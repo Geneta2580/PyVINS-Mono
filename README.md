@@ -2,6 +2,31 @@
 
 **PyVINS-Mono** is a Python implementation of the VINS-Mono algorithm, leveraging **GTSAM** for robust back-end optimization. This project aims to provide an easy-to-use, modular, and extensible visual-inertial SLAM (VIO) framework tailored for the Python ecosystem.
 
+## 😎 Demo
+
+<table align="center">
+  <tr>
+    <th align="center"><strong>ROS Rviz View</strong></th>
+    <th align="center"><strong>Open3D View</strong></th>
+  </tr>
+  <tr>
+    <td align="center"><img src="asset/10x_ros.gif" height="224"></td>
+    <td align="center"><img src="asset/open3d.gif" height="224"></td>
+  </tr>
+</table>
+
+
+<table align="center">
+  <tr>
+    <th align="center"><strong>MH_01_easy evo trajectory</strong></th>
+    <th align="center"><strong>MH_01_easy evo accuracy</strong></th>
+  </tr>
+  <tr>
+    <td align="center"><img src="asset/MH01_easy_evo_result.png" height="224"></td>
+    <td align="center"><img src="asset/MH01_easy_evo_num_result.png" height="224"></td>
+  </tr>
+</table>
+
 ## 📖 Overview
 
 This project is built upon the **GTSAM 4.3a** framework. The logic and implementation details draw inspiration and reference from the following established open-source projects:
@@ -52,10 +77,10 @@ Modify the configuration file (located in `config/`) to set the path to your tar
 ### 2. Running the Project
 Open your terminal(with gtsam environment), navigate to the project root, and execute:
 ```bash
-python3 main.py
+python3 main.py --config config/config_kitti.yaml
 ```
 
-##📝 Todo & Roadmap
+## 📝 Todo & Roadmap
 We are actively working on improving PyVINS-Mono
 - [ ] Fix IMU gyroscope bias drift
 - [ ] Add ROS interface

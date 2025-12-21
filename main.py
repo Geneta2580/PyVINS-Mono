@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description="PyVINS-Fusion: Visual-Inertial SLAM System For Python")
 
     # 配置文件路径
-    parser.add_argument('--config', type=Path, default='config/config.yaml',
+    parser.add_argument('--config', type=Path, default='config/config_kitti.yaml',
                         help="Path to the configuration file")
     args = parser.parse_args()
 

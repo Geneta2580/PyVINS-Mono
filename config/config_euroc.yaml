@@ -1,0 +1,118 @@
+# ----------------------------------------------------------------------------
+# 数据集参数 (Dataset Parameters)
+# ----------------------------------------------------------------------------
+# 数据集根目录的路径
+# euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
+# tum：/home/pangjunxiang/dataset/TUM/freiburg1
+# kitti:
+dataset_path: "/home/geneta/dataset/source_dataset/MH_01_easy"
+
+# 支持euroc\tum\kitti数据集
+dataset_type: "euroc"
+
+# ----------------------------------------------------------------------------
+# 视觉前端配置参数
+# ----------------------------------------------------------------------------
+# 窗口大小
+window_size: 10
+
+# 选择关键帧最小视差 10
+min_parallax: 10
+
+# 静止视差
+min_stationary_parallax: 0.5
+
+# 最大特征点数
+max_features_to_detect: 150
+
+# 最小跟踪比例
+min_track_ratio: 0.5
+
+# 最小跟踪比例
+min_kf_interval: 0.2 # 最小关键帧时间间隔(s) 0.2
+max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
+
+# 特征点间的最小像素距离
+min_dist: 30
+
+# 相机内参
+cam_intrinsics: [458.654, 0.000, 367.215,
+                 0.000, 457.296, 248.375, 
+                 0.000, 0.000, 1.000]
+
+# 相机畸变参数
+distortion_model: "fisheye"
+distortion_coefficients: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
+
+# RANSAC相关参数
+use_ransac: False
+ransac_threshold: 1.0
+ransac_prob: 0.999
+
+# 是否可视化追踪结果
+visualize: True
+
+# ----------------------------------------------------------------------------
+# IMU配置参数
+# ----------------------------------------------------------------------------
+# 重力模长
+gravity: 9.81
+
+# 注意这里只是sigma，不是sigma^2
+# accel_noise_sigma: 0.002
+# accel_bias_rw_sigma: 0.003 # 零偏随机游走
+# gyro_noise_sigma: 0.0002
+# gyro_bias_rw_sigma: 0.00002
+
+# accel_noise_sigma: 0.002
+# accel_bias_rw_sigma: 0.0003
+# gyro_noise_sigma: 0.00016968
+# gyro_bias_rw_sigma: 0.000019393
+
+accel_noise_sigma: 0.008          # 从0.002改为0.008
+accel_bias_rw_sigma: 0.0003        # 从0.0003改为0.001
+gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
+
+# accel_noise_sigma: 0.028
+# gyro_noise_sigma: 0.0024
+# accel_bias_rw_sigma: 0.00021
+# gyro_bias_rw_sigma: 0.0000137
+
+
+# ----------------------------------------------------------------------------
+# 后端配置参数
+# ----------------------------------------------------------------------------
+# 初始化窗口大小
+init_window_size: 10
+
+# 边缘化窗口大小
+lag_window_size: 9 # 10-1
+
+# 初始化外参
+T_bc: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
+       0.999557249008, -0.0149672133247, 0.025715529948, -0.064676986768,
+      -0.0257744366974, 0.00375618835797, 0.999660727178, 0.00981073058949,
+       0.0, 0.0, 0.0, 1.0]
+
+# 是否使用深度降权
+use_depth_weight: False
+
+# 深度降权参数
+depth_weight_base: 5.0    # 基础深度阈值（米），超过此深度开始降权
+depth_weight_max: 3.0     # 最大噪声倍数（深度很远时噪声增加到3倍）
+depth_weight_power: 1.5    # 深度权重指数，控制降权曲线的陡峭程度 
+
+# 新路标点噪声膨胀比例 (权重膨胀比例越大，新路标点权重越小)
+new_landmark_inflation_ratio: 1.0    
+
+
+# ----------------------------------------------------------------------------
+# 输出结果
+# ----------------------------------------------------------------------------
+# 是否可视化
+enable_viewer: True
+
+# 输出轨迹文件路径
+trajectory_output_path: "output/estimated_trajectory.txt" 
+

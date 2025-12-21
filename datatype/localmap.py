@@ -16,8 +16,9 @@ class LocalMap:
 
         self.max_keyframes = self.config.get('window_size', 10)
         self.max_depth = 400.0
-        self.triangulation_max_reprojection_error = 40.0
-        self.optimization_max_reprojection_error = 40.0
+        self.min_depth = 0.4
+        self.triangulation_max_reprojection_error = 60.0
+        self.optimization_max_reprojection_error = 60.0
         self.optimization_max_delete_reprojection_error = 1000.0
 
         self.cam_intrinsics = np.asarray(self.config.get('cam_intrinsics')).reshape(3, 3)
@@ -89,7 +90,7 @@ class LocalMap:
     def get_candidate_landmarks(self):
         return [lm for lm in self.landmarks.values() if lm.status == LandmarkStatus.CANDIDATE]
 
-    def check_landmark_health(self, landmark_id, candidate_position_3d=None, min_parallax_angle_deg=5.0):
+    def check_landmark_health(self, landmark_id, candidate_position_3d=None, min_parallax_angle_deg=7.0):
         lm = self.landmarks.get(landmark_id)
         # 必须是已三角化的点才有3D位置
         if not lm:
@@ -163,7 +164,7 @@ class LocalMap:
             # 深度必须为正
             depth = point_in_cam_homo[2] / point_in_cam_homo[3]
             print(f"【Triangulation Health Check】: Landmark {lm.id} depth: {depth:.4f}")
-            if depth <= 0.2 or depth > 400.0:
+            if depth <= self.min_depth or depth > self.max_depth:
                 print(f"【Triangulation Health Check】: Landmark {lm.id} failed cheirality in KF {kf.get_id()}. Depth: {depth:.4f}m")
                 return False
 
@@ -229,7 +230,7 @@ class LocalMap:
             
             # 检查深度是否为正且在合理范围内
             depth = point_in_cam_homo[2]
-            if depth <= 0.2 or depth > self.max_depth:
+            if depth <= self.min_depth or depth > self.max_depth:
                 if depth < 0.0:
                     print(f"【Optimization Health Check】: Landmark {lm.id} has negative depth in KF {kf.get_id()}. Depth: {depth:.4f}m")
                     return False, False, True

@@ -8,7 +8,7 @@ class VisualProcessor:
         self.config = config
         self.max_features_to_detect = self.config.get('max_features_to_detect', 500) # 最大特征点数
         self.min_parallax = self.config.get('min_parallax', 10) # 最小视差
-        self.min_stationary_parallax = self.config.get('min_stationary_parallax', 0.5) # 最小静止视差
+        self.min_stationary_parallax = self.config.get('min_stationary_parallax', 3.0) # 最小静止视差
         self.min_track_ratio = self.config.get('min_track_ratio', 0.8) # 最小跟踪比例
         self.visualize_flag = self.config.get('visualize', True) # 是否可视化追踪结果
 
@@ -17,10 +17,19 @@ class VisualProcessor:
         self.cam_matrix = np.asarray(cam_matrix_raw).reshape(3, 3)
 
         # 读取相机畸变参数
-        dist_coeffs_raw = self.config.get('distortion_coefficients', np.zeros(4).tolist())
-        self.dist_coeffs = np.asarray(dist_coeffs_raw).reshape(4, 1)
+        self.distortion_model = self.config.get('distortion_model', 'radtan').lower()
+        dist_coeffs_raw = self.config.get('distortion_coefficients', [])
+        self.dist_coeffs = np.asarray(dist_coeffs_raw).astype(np.float32)
 
-        self.min_dist = self.config.get('min_dist', 30) # 特征点间的最小像素距离
+        if self.distortion_model == 'fisheye':
+            # cv2.fisheye 要求畸变系数通常为 4个
+            self.dist_coeffs = self.dist_coeffs.reshape(4)
+        else:
+            # cv2.undistortPoints 接受 (N,) 或 (1, N)
+            self.dist_coeffs = self.dist_coeffs.reshape(-1)
+
+        # 特征点间的最小像素距离
+        self.min_dist = self.config.get('min_dist', 30)
 
         # 特征点id
         self.next_feature_id = 0
@@ -57,15 +66,34 @@ class VisualProcessor:
     # 特征点去畸变
     def undistort_points(self, points):
         if self.cam_matrix is None or self.dist_coeffs is None or len(points) == 0:
-            return points # 如果没有内参，则返回原始点
+            return points 
         
-        # cv2.undistortPoints 需要 (N, 1, 2) 的形状
+        # cv2 需要 (N, 1, 2) 的形状
         points_reshaped = points.reshape(-1, 1, 2).astype(np.float32)
         
-        # P设置为K，可以直接输出去畸变后的像素坐标
-        undistorted_points = cv2.undistortPoints(points_reshaped, self.cam_matrix, self.dist_coeffs, P=self.cam_matrix)
+        # P=self.cam_matrix 表示去畸变后仍投影回原相机内参的像素坐标系
+        # 如果 P=None 或 identity，则返回归一化平面坐标
         
-        return undistorted_points.reshape(-1, 2) # 返回 (N, 2) 形状
+        if self.distortion_model == 'fisheye':
+            # 使用鱼眼模型去畸变 (EuRoC)
+            # 注意: cv2.fisheye.undistortPoints 对参数形状要求较严格
+            undistorted_points = cv2.fisheye.undistortPoints(
+                points_reshaped, 
+                self.cam_matrix, 
+                self.dist_coeffs, 
+                R=np.eye(3), 
+                P=self.cam_matrix
+            )
+        else:
+            # 使用标准 RadTan/Plumb Bob 模型去畸变 (KITTI)
+            undistorted_points = cv2.undistortPoints(
+                points_reshaped, 
+                self.cam_matrix, 
+                self.dist_coeffs, 
+                P=self.cam_matrix
+            )
+        
+        return undistorted_points.reshape(-1, 2)
 
     # 按照特征点追踪时间重排并添加mask
     def filter_features_by_age(self, features, features_ids, image_shape):
