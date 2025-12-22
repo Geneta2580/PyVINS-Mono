@@ -15,11 +15,12 @@ class LocalMap:
         self.T_bc = np.asarray(T_bc_raw).reshape(4, 4)
 
         self.max_keyframes = self.config.get('window_size', 10)
-        self.max_depth = 400.0
-        self.min_depth = 0.4
-        self.triangulation_max_reprojection_error = 60.0
-        self.optimization_max_reprojection_error = 60.0
-        self.optimization_max_delete_reprojection_error = 1000.0
+        self.max_depth = self.config.get('max_depth', 400)
+        self.min_depth = self.config.get('min_depth', 0.4)
+        self.triangulation_max_reprojection_error = self.config.get('triangulation_max_reprojection_error', 60.0)
+        self.optimization_max_reprojection_error = self.config.get('optimization_max_reprojection_error', 60.0)
+        self.optimization_max_delete_reprojection_error = self.config.get('optimization_max_delete_reprojection_error', 1000.0)
+        self.min_parallax_angle_deg = self.config.get('min_parallax_angle_deg', 5.0)
 
         self.cam_intrinsics = np.asarray(self.config.get('cam_intrinsics')).reshape(3, 3)
 
@@ -90,7 +91,7 @@ class LocalMap:
     def get_candidate_landmarks(self):
         return [lm for lm in self.landmarks.values() if lm.status == LandmarkStatus.CANDIDATE]
 
-    def check_landmark_health(self, landmark_id, candidate_position_3d=None, min_parallax_angle_deg=7.0):
+    def check_landmark_health(self, landmark_id, candidate_position_3d=None):
         lm = self.landmarks.get(landmark_id)
         # 必须是已三角化的点才有3D位置
         if not lm:
@@ -143,7 +144,7 @@ class LocalMap:
         # 检查基线与深度的比值（近似于 2 * tan(parallax_angle / 2)）
         # 一个小的角度，tan(theta)约等于theta（弧度）
         ratio = baseline / depth
-        threshold = np.deg2rad(min_parallax_angle_deg)
+        threshold = np.deg2rad(self.min_parallax_angle_deg)
 
         print(f"【Triangulation Health Check】: Landmark {lm.id} ratio: {ratio:.4f}, threshold: {threshold:.4f}")
         if ratio < threshold:

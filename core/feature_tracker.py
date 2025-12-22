@@ -37,9 +37,6 @@ class FeatureTracker(threading.Thread):
         print("Visual Feature Tracker thread started.")
         for i, (timestamp, event_type, data) in enumerate(self.dataloader):
 
-            if self.config.get('dataset_type', 'euroc') == 'euroc':
-                timestamp = timestamp * 1e-9 # euroc数据集单位转换为s
-
             # 如果frontend被关闭，则退出循环
             if not self.is_running:
                 break
@@ -78,20 +75,23 @@ class FeatureTracker(threading.Thread):
                     is_kf_temp = is_kf_visual and is_kf_time_min
                     is_kf = is_kf_temp or is_kf_time_max
 
+                # 处理图像信息
+                visual_features = {
+                    'visual_features': undistorted_features,
+                    'feature_ids': feature_ids,
+                    'timestamp': timestamp,
+                    'image': image_data,
+                    'is_kf': is_kf,
+                    'is_stationary': is_stationary
+                }
+
+                try:
+                    self.output_queue.put(visual_features, timeout=0.1) 
+                except queue.Full:
+                    pass
+
                 if is_kf:
-                    # 处理关键帧
-                    visual_features = {
-                        'visual_features': undistorted_features,
-                        'feature_ids': feature_ids,
-                        'timestamp': timestamp,
-                        'image': image_data,
-                        'is_stationary': is_stationary
-                    }
                     self.last_kf_timestamp = timestamp
-                    try:
-                        self.output_queue.put(visual_features, timeout=0.1) 
-                    except queue.Full:
-                        pass
                     print(f"【FeatureTracker】Keyframe: {visual_features['timestamp']}")
         
         # 从数据循环中跳出，表示程序需要结束

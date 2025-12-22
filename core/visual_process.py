@@ -74,24 +74,7 @@ class VisualProcessor:
         # P=self.cam_matrix 表示去畸变后仍投影回原相机内参的像素坐标系
         # 如果 P=None 或 identity，则返回归一化平面坐标
         
-        if self.distortion_model == 'fisheye':
-            # 使用鱼眼模型去畸变 (EuRoC)
-            # 注意: cv2.fisheye.undistortPoints 对参数形状要求较严格
-            undistorted_points = cv2.fisheye.undistortPoints(
-                points_reshaped, 
-                self.cam_matrix, 
-                self.dist_coeffs, 
-                R=np.eye(3), 
-                P=self.cam_matrix
-            )
-        else:
-            # 使用标准 RadTan/Plumb Bob 模型去畸变 (KITTI)
-            undistorted_points = cv2.undistortPoints(
-                points_reshaped, 
-                self.cam_matrix, 
-                self.dist_coeffs, 
-                P=self.cam_matrix
-            )
+        undistorted_points = cv2.undistortPoints(points_reshaped, self.cam_matrix, self.dist_coeffs, P=self.cam_matrix)
         
         return undistorted_points.reshape(-1, 2)
 

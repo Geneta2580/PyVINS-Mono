@@ -1,0 +1,9 @@
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略输出结果
+output/
+hessian.txt
+TEST.txt
+*.log

@@ -13,6 +13,8 @@ class KeyFrame:
         self.visual_features = None
         self.visual_feature_ids = None
 
+        self.is_stationary = False
+
     # 写入类信息(write)
     def set_image(self, image):
         self.image = image
@@ -30,6 +32,9 @@ class KeyFrame:
     def set_point_cloud(self, point_cloud, color):
         self.point_cloud = point_cloud
         self.color = color
+
+    def set_is_stationary(self, is_stationary):
+        self.is_stationary = is_stationary
 
     # 读取类信息(read)
     def get_id(self):
@@ -56,3 +61,5 @@ class KeyFrame:
     def get_visual_feature_ids(self):
         return self.visual_feature_ids
     
+    def get_is_stationary(self):
+        return self.is_stationary

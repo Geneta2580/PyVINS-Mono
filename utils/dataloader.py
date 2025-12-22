@@ -56,7 +56,7 @@ class UnifiedDataloader:
         cam0_df['filepath'] = cam0_df['filename'].apply(lambda x: str(self.cam_data_path / x))
         
         # 【时间戳转换】 EuRoC是纳秒整数 -> 秒(UTC浮点)
-        cam0_df['timestamp'] = cam0_df['timestamp'] / 1e9
+        cam0_df['timestamp'] = cam0_df['timestamp'] * 1e-9
 
         # 读取IMU
         try:
@@ -68,7 +68,7 @@ class UnifiedDataloader:
             
             imu0_df['type'] = 'IMU'
             # 【时间戳转换】 EuRoC是纳秒整数 -> 秒(UTC浮点)
-            imu0_df['timestamp'] = imu0_df['timestamp'] / 1e9
+            imu0_df['timestamp'] = imu0_df['timestamp'] * 1e-9
             
             print(f"【Dataloader】: Loaded {len(cam0_df)} images and {len(imu0_df)} IMU msgs (EuRoC)")
             return pd.concat([cam0_df, imu0_df])

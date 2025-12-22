@@ -43,6 +43,7 @@ class Estimator(threading.Thread):
         self.is_initialized = False
 
         self.init_window_size = self.config.get('init_window_size', 10)
+        self.initial_parallax = self.config.get('initial_parallax', 70)
 
         self.gravity_magnitude = self.config.get('gravity', 9.81)
         T_bc_raw = self.config.get('T_bc', np.eye(4).flatten().tolist())
@@ -59,6 +60,9 @@ class Estimator(threading.Thread):
 
         # 劣质点黑名单
         self.landmark_denylist = set()
+
+        # 最后一个处理的关键帧时间戳
+        self.last_processed_kf_id = None
 
         # Threading control
         self.is_running = False
@@ -84,8 +88,6 @@ class Estimator(threading.Thread):
                     print("【Estimator】received shutdown signal from frontend.")
                     break 
 
-                timestamp = package['timestamp']
-
                 # 接收IMU数据
                 if 'imu_measurements' in package:
                     self.imu_buffer.append(package)
@@ -97,45 +99,77 @@ class Estimator(threading.Thread):
                     feature_ids = package['feature_ids']
                     image = package['image']
                     is_stationary = package['is_stationary']
+                    is_kf = package['is_kf']
                     if is_stationary:
                         print(f"【Estimator】: Stationary frame detected at timestamp: {timestamp}")
 
-                    # 过滤掉黑名单中的特征点
-                    filtered_features = []
-                    filtered_ids = []
-                    for feat, fid in zip(visual_features, feature_ids):
-                        if fid not in self.landmark_denylist:
-                            filtered_features.append(feat)
-                            filtered_ids.append(fid)
-                    
-                    if len(filtered_ids) < 10: # (可选的安全检查)
-                        print(f"【Estimator】: 过滤后特征点过少 ({len(filtered_ids)})，跳过此帧。")
-                        continue
-
-                    new_id = self.next_kf_id
-                    new_kf = KeyFrame(new_id, timestamp)
-                    new_kf.add_visual_features(filtered_features, filtered_ids)
-                    new_kf.set_image(image)
-
-                    self.next_kf_id += 1
-                    stale_lm_ids = self.local_map.add_keyframe(new_kf)
-
-                    active_keyframes = self.local_map.get_active_keyframes()
-
-                    if not self.is_initialized:
-                        if len(active_keyframes) == self.init_window_size:
-                            self.visual_inertial_initialization()
+                    # 若为关键帧
+                    if is_kf:
+                        # 过滤掉黑名单中的特征点
+                        filtered_features = []
+                        filtered_ids = []
+                        for feat, fid in zip(visual_features, feature_ids):
+                            if fid not in self.landmark_denylist:
+                                filtered_features.append(feat)
+                                filtered_ids.append(fid)
                         
-                        else:
-                            print(f"【Init】: Collecting frames... {len(active_keyframes)}/{self.init_window_size}")
+                        if len(filtered_ids) < 10: # (可选的安全检查)
+                            print(f"【Estimator】: 过滤后特征点过少 ({len(filtered_ids)})，跳过此帧。")
+                            continue
+
+                        new_id = self.next_kf_id
+                        new_kf = KeyFrame(new_id, timestamp)
+                        new_kf.add_visual_features(filtered_features, filtered_ids)
+                        new_kf.set_image(image)
+                        new_kf.set_is_stationary(is_stationary)
+
+                        self.next_kf_id += 1
+                        stale_lm_ids = self.local_map.add_keyframe(new_kf)
+                    
+                    # 若为普通帧
                     else:
-                        # pass
-                        self.process_package_data(new_kf, is_stationary)
+                        # 处理普通帧
+                        pass
+
+                # 处理视觉及惯性信息
+                # 初始化
+                if not self.is_initialized:
+                    active_keyframes = self.local_map.get_active_keyframes()
+                    if len(active_keyframes) == self.init_window_size:
+                        self.visual_inertial_initialization()
+                    
+                    else:
+                        print(f"【Init】: Collecting frames... {len(active_keyframes)}/{self.init_window_size}")
+
+                # 正常追踪递推
+                else:
+                    # pass
+                    # 若最新普通帧更新
+
+                    # 若最新关键帧更新
+                    is_new_keyframe, latest_kf, latest_kf_id = self.check_new_keyframe()
+                    if is_new_keyframe:
+                        is_stationary = latest_kf.get_is_stationary()
+                        self.process_package_data(latest_kf, is_stationary)
+                        self.last_processed_kf_id = latest_kf_id
+
 
             except queue.Empty:
                 continue
         
         print("【Estimator】thread has finished.")
+
+    def check_new_keyframe(self):
+        active_keyframes = self.local_map.get_active_keyframes()
+        if len(active_keyframes) == 0:
+            return False
+        
+        latest_kf = active_keyframes[-1]
+        latest_kf_id = latest_kf.get_id()
+
+        is_new_keyframe = (self.last_processed_kf_id is None or latest_kf_id > self.last_processed_kf_id)
+
+        return is_new_keyframe, latest_kf, latest_kf_id
 
     def create_imu_factors(self, kf_start, kf_end):
         start_ts = kf_start.get_timestamp()
@@ -439,7 +473,7 @@ class Estimator(threading.Thread):
             parallax = np.median(np.linalg.norm(p1_cand - p2_cand, axis=1))
 
             # 保证一定的视差，这里是一个非常敏感的参数，每次代码改动都可能需要重新调整这个参数
-            if parallax > 70:
+            if parallax > self.initial_parallax:
                 print(f"【Visual Init】: Found a good pair! (KF {ref_kf.get_id()}, KF {potential_curr_kf.get_id()}) "
                       f"with parallax {parallax:.2f} px.")
 
