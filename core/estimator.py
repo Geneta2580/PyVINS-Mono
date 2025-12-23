@@ -38,6 +38,7 @@ class Estimator(threading.Thread):
         self.sfm_processor = SfMProcessor(self.cam_intrinsics)
 
         self.next_kf_id = 0
+        self.next_normal_frame_id = 0
 
         # 初始化相关设置
         self.is_initialized = False
@@ -52,6 +53,9 @@ class Estimator(threading.Thread):
         # 可视化test
         self.viewer_queue = viewer_queue
 
+        # 是否使用IMU输出
+        self.use_imu_output = self.config.get('use_imu_output', False)
+
         # 轨迹文件
         self.trajectory_file = None
         trajectory_output_path = self.config.get('trajectory_output_path', None) # self.config.get('trajectory_output_path', None)
@@ -62,7 +66,19 @@ class Estimator(threading.Thread):
         self.landmark_denylist = set()
 
         # 最后一个处理的关键帧时间戳
-        self.last_processed_kf_id = None
+        self.last_processed_kf_id = -1
+
+        # 最后一个处理的关键帧时间戳
+        self.last_processed_normal_frame_id = -1
+
+        # 最后一个处理IMU的时间戳
+        self.last_processed_imu_timestamp = -1
+
+        # 普通帧缓冲区
+        self.normal_frame_buffer = []
+
+        # 最新的导航状态（用于快速积分）
+        self.latest_nav_state = None
 
         # Threading control
         self.is_running = False
@@ -128,8 +144,14 @@ class Estimator(threading.Thread):
                     
                     # 若为普通帧
                     else:
-                        # 处理普通帧
-                        pass
+                        new_normal_id = self.next_normal_frame_id
+                        new_frame = KeyFrame(new_normal_id, timestamp)
+                        new_frame.add_visual_features(filtered_features, filtered_ids)
+                        new_frame.set_image(image)
+                        new_frame.set_is_stationary(is_stationary)
+
+                        self.next_normal_frame_id += 1
+                        self.normal_frame_buffer.append(new_frame)
 
                 # 处理视觉及惯性信息
                 # 初始化
@@ -145,13 +167,30 @@ class Estimator(threading.Thread):
                 else:
                     # pass
                     # 若最新普通帧更新
+                    if len(self.normal_frame_buffer) > 0:
+                        latest_frame = self.normal_frame_buffer[-1]
+                        is_stationary = latest_frame.get_is_stationary()
+                        if latest_frame.get_id() > self.last_processed_normal_frame_id:
+                            self.process_normal_frame_data(latest_frame, is_stationary)
+                            self.last_processed_normal_frame_id = latest_frame.get_id()
+                            self.normal_frame_buffer.pop(0)
 
                     # 若最新关键帧更新
                     is_new_keyframe, latest_kf, latest_kf_id = self.check_new_keyframe()
                     if is_new_keyframe:
                         is_stationary = latest_kf.get_is_stationary()
-                        self.process_package_data(latest_kf, is_stationary)
+                        self.process_keyframe_data(latest_kf, is_stationary)
                         self.last_processed_kf_id = latest_kf_id
+                    
+                    # 若最新IMU数据更新
+                    # TODO：目前未加入重积分机制，精度会有损失
+                    if self.use_imu_output:
+                        # 检查 IMU 缓冲区是否有数据
+                        if len(self.imu_buffer) >= 2:  # 至少需要2个数据点才能计算dt
+                            latest_imu_timestamp = self.imu_buffer[-1]['timestamp']
+                            if latest_imu_timestamp > self.last_processed_imu_timestamp:
+                                self.process_imu_data(latest_imu_timestamp)
+                                self.last_processed_imu_timestamp = latest_imu_timestamp
 
 
             except queue.Empty:
@@ -409,6 +448,16 @@ class Estimator(threading.Thread):
             )
             self.is_initialized = True
 
+            # 用后端优化结果初始化最新的导航状态
+            latest_pose, latest_velocity, _ = self.backend.get_latest_optimized_state()
+            if latest_pose is not None and latest_velocity is not None:
+                latest_vel_np = np.array(latest_velocity) if not isinstance(latest_velocity, np.ndarray) else latest_velocity
+                self.latest_nav_state = {
+                    'pose': latest_pose,
+                    'velocity': latest_vel_np
+                }
+                print(f"【Init】: Initialized latest_nav_state from backend optimization")
+
             # 记录初始优化轨迹
             if self.trajectory_file:
                 print("【Estimator】正在记录初始优化轨迹...")
@@ -561,7 +610,7 @@ class Estimator(threading.Thread):
         
         return True, ref_kf, curr_kf, ids_best, p1_best, p2_best
 
-    def process_package_data(self, new_kf, is_stationary):
+    def process_keyframe_data(self, new_kf, is_stationary):
         active_kfs = self.local_map.get_active_keyframes()
         if len(active_kfs) < 2:
             return
@@ -675,7 +724,7 @@ class Estimator(threading.Thread):
         # 优化结束，同步后端结果到Estimator
         self.backend.update_estimator_map(active_kfs, self.local_map.landmarks)
         
-        # 审计地图，移除所有变得不健康的“坏苹果”
+        # 审计地图，移除所有变得不健康的"坏苹果"
         start_time = time.time()
         # self.audit_map_after_optimization(oldest_kf_id_in_window)
         end_time = time.time()
@@ -685,6 +734,17 @@ class Estimator(threading.Thread):
         _, _, latest_bias = self.backend.get_latest_optimized_state()
         if latest_bias:
             self.imu_processor.update_bias(latest_bias)
+
+        # 用后端优化结果更新最新的导航状态（位姿和速度）
+        latest_pose, latest_velocity, _ = self.backend.get_latest_optimized_state()
+        if latest_pose is not None and latest_velocity is not None:
+            # 将速度转换为 numpy 数组
+            latest_vel_np = np.array(latest_velocity) if not isinstance(latest_velocity, np.ndarray) else latest_velocity
+            self.latest_nav_state = {
+                'pose': latest_pose,
+                'velocity': latest_vel_np
+            }
+            print(f"【Estimator】: Updated latest_nav_state from backend optimization")
 
         # 记录优化轨迹
         Debugger.log_trajectory_tum(self.trajectory_file, new_kf) # 调用静态方法
@@ -715,3 +775,46 @@ class Estimator(threading.Thread):
                 self.viewer_queue.put_nowait(vis_data)
             except queue.Full:
                 print("【Estimator】: Viewer queue is full, skipping visualization data.")
+
+    def process_normal_frame_data(self, new_frame, is_stationary):
+        # 目前还没想好要不要在初始化阶段加入motion only BA
+        pass
+
+    def process_imu_data(self, latest_imu_timestamp):
+        # 检查 latest_nav_state 是否已初始化
+        if self.latest_nav_state is None:
+            # 尝试从后端获取最新状态
+            latest_pose, latest_velocity, _ = self.backend.get_latest_optimized_state()
+            if latest_pose is not None and latest_velocity is not None:
+                latest_vel_np = np.array(latest_velocity) if not isinstance(latest_velocity, np.ndarray) else latest_velocity
+                self.latest_nav_state = {
+                    'pose': latest_pose,
+                    'velocity': latest_vel_np
+                }
+            else:
+                print("【Warning】: latest_nav_state not initialized and cannot get from backend")
+                return
+        
+        latest_imu_data = self.imu_buffer[-1]
+        last_imu_data = self.imu_buffer[-2]
+
+        last_imu_timestamp = last_imu_data['timestamp']
+        dt = latest_imu_timestamp - last_imu_timestamp
+
+        if dt > 0:
+            current_pose, current_velocity = self.imu_processor.fast_integration(
+                dt, self.latest_nav_state, latest_imu_data['imu_measurements']
+            )
+            # 更新 latest_nav_state
+            self.latest_nav_state = {
+                'pose': current_pose,
+                'velocity': current_velocity
+            }
+            # 记录快速积分的位姿到轨迹文件
+            if self.trajectory_file:
+                Debugger.log_pose_tum(self.trajectory_file, latest_imu_timestamp, current_pose)
+                # 注意：这里不立即flush，让系统自动缓冲，提高性能
+                # 如果需要实时写入，可以取消下面的注释
+                # self.trajectory_file.flush()
+            
+            return

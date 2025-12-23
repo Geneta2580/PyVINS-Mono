@@ -158,3 +158,31 @@ class Debugger:
             log_line = f"{timestamp} {t[0]} {t[1]} {t[2]} {q.x()} {q.y()} {q.z()} {q.w()}\n"
             
             file_handle.write(log_line)
+
+    @staticmethod
+    def log_pose_tum(file_handle, timestamp, pose):
+        """
+        将 gtsam.Pose3 位姿以TUM格式记录到指定的轨迹文件中。
+        这是一个静态函数，用于记录快速积分过程中的位姿。
+
+        参数:
+        file_handle (File): 用于写入的文件句柄。
+        timestamp (float): 时间戳（秒）
+        pose (gtsam.Pose3): GTSAM位姿对象
+        """
+        if not file_handle or pose is None:
+            return
+
+        try:
+            # 提取平移向量
+            t = pose.translation()
+            # 提取旋转并转换为四元数
+            q = pose.rotation().toQuaternion()
+            
+            # 按照TUM格式写入: timestamp tx ty tz qx qy qz qw
+            # gtsam.Quaternion 的顺序是 (w, x, y, z)，所以我们需要调整顺序为 (x, y, z, w)
+            log_line = f"{timestamp} {t[0]} {t[1]} {t[2]} {q.x()} {q.y()} {q.z()} {q.w()}\n"
+            
+            file_handle.write(log_line)
+        except Exception as e:
+            print(f"【Debugger】: Error logging pose to trajectory file: {e}")
