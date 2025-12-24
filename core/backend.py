@@ -23,7 +23,8 @@ class Backend:
         self.smoother = IncrementalFixedLagSmoother(self.lag_window_size, parameters) # 自动边缘化
         
         # 鲁棒因子
-        self.visual_noise = gtsam.noiseModel.Isotropic.Sigma(2, 2.0)
+        self.visual_noise_sigma = config.get('visual_noise_sigma', 2.0)
+        self.visual_noise = gtsam.noiseModel.Isotropic.Sigma(2, self.visual_noise_sigma)
         self.visual_robust_noise = gtsam.noiseModel.Robust.Create(gtsam.noiseModel.mEstimator.Huber.Create(1.345), self.visual_noise)
 
         # 是否使用深度降权
@@ -62,7 +63,7 @@ class Backend:
             "new_factors_error"
         ]
         # 初始化Debugger
-        self.logger = Debugger(file_prefix="backend_state", column_names=log_columns)
+        self.logger = Debugger(self.config, file_prefix="backend_state", column_names=log_columns)
 
     # 关键帧id映射到图的id
     def _get_kf_gtsam_id(self, kf_id):
@@ -308,14 +309,20 @@ class Backend:
         kf_gtsam_id = self._get_kf_gtsam_id(new_keyframe.get_id())
         T_wb_guess, vel_guess, bias_guess = initial_state_guess
 
-        new_estimates.insert(X(kf_gtsam_id), T_wb_guess)
-        new_estimates.insert(V(kf_gtsam_id), vel_guess)
-        new_estimates.insert(B(kf_gtsam_id), bias_guess)
+        # 检查关键帧是否已经在图中存在，避免重复添加（防御性检查）
+        if not current_isam_values.exists(X(kf_gtsam_id)) or not current_isam_values.exists(V(kf_gtsam_id)) or not current_isam_values.exists(B(kf_gtsam_id)):
+            new_estimates.insert(X(kf_gtsam_id), T_wb_guess)
+            new_estimates.insert(V(kf_gtsam_id), vel_guess)
+            new_estimates.insert(B(kf_gtsam_id), bias_guess)
 
-        # 添加滑窗记录
-        new_window_stamps[X(kf_gtsam_id)] = float(kf_gtsam_id)
-        new_window_stamps[V(kf_gtsam_id)] = float(kf_gtsam_id)
-        new_window_stamps[B(kf_gtsam_id)] = float(kf_gtsam_id)
+            # 添加滑窗记录
+            new_window_stamps[X(kf_gtsam_id)] = float(kf_gtsam_id)
+            new_window_stamps[V(kf_gtsam_id)] = float(kf_gtsam_id)
+            new_window_stamps[B(kf_gtsam_id)] = float(kf_gtsam_id)
+        else:
+            print(f"【Backend】: Warning: Keyframe {new_keyframe.get_id()} (gtsam_id={kf_gtsam_id}) already exists in graph. Skipping variable insertion.")
+            # 如果关键帧已存在，仍然需要更新滑窗时间戳（如果Fixed-Lag Smoother需要）
+            # 注意：这里不添加变量，只更新时间戳（如果需要的话）
 
         # if not is_stationary:
         # 添加IMU因子

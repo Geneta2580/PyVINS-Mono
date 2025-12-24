@@ -17,6 +17,7 @@ class VisualProcessor:
         self.cam_matrix = np.asarray(cam_matrix_raw).reshape(3, 3)
 
         # 读取相机畸变参数
+        self.use_undistort = self.config.get('use_undistort', True)
         self.distortion_model = self.config.get('distortion_model', 'radtan').lower()
         dist_coeffs_raw = self.config.get('distortion_coefficients', [])
         self.dist_coeffs = np.asarray(dist_coeffs_raw).astype(np.float32)
@@ -134,7 +135,7 @@ class VisualProcessor:
         # 第一帧处理逻辑，必定为关键帧
         if self.prev_gray is None or self.prev_pts is None or len(self.prev_pts) == 0:
             self.prev_gray = curr_gray
-            self.prev_pts = self.detect_features(self.prev_gray, self.max_features_to_detect)
+            self.prev_pts = self.detect_features(self.prev_gray, self.max_features_to_detect) # (N, 1, 2)
             if self.prev_pts is None:
                 return None, None, False, False
 
@@ -147,7 +148,10 @@ class VisualProcessor:
             for feature_id in self.prev_pt_ids:
                 self.feature_ages[feature_id] = 1
 
-            undistorted_pts = self.undistort_points(self.prev_pts)
+            if self.use_undistort:
+                undistorted_pts = self.undistort_points(self.prev_pts)
+            else:
+                undistorted_pts = self.prev_pts.reshape(-1, 2) # (N, 2)
 
             # 可视化第一帧
             if self.visualize_flag:
@@ -189,8 +193,12 @@ class VisualProcessor:
         # ============== 添加RANSAC几何验证 ==============
         if self.use_ransac and len(good_curr) >= 8:  # 至少需要8个点
             # 去畸变特征点用于本质矩阵估计
-            good_prev_undist = self.undistort_points(good_prev)
-            good_curr_undist = self.undistort_points(good_curr)
+            if self.use_undistort:
+                good_prev_undist = self.undistort_points(good_prev)
+                good_curr_undist = self.undistort_points(good_curr)
+            else:
+                good_prev_undist = good_prev.reshape(-1, 2) # (N, 2)
+                good_curr_undist = good_curr.reshape(-1, 2) # (N, 2)
             
             # 归一化坐标（Essential Matrix需要）
             fx = self.cam_matrix[0, 0]
@@ -328,7 +336,10 @@ class VisualProcessor:
         self.prev_pt_ids = final_ids
 
         # 特征点去畸变
-        undistorted_final_pts = self.undistort_points(final_pts)
+        if self.use_undistort:
+            undistorted_final_pts = self.undistort_points(final_pts)
+        else:
+            undistorted_final_pts = final_pts.reshape(-1, 2) # (N, 2)
 
         return undistorted_final_pts, final_ids, is_kf, is_stationary
 

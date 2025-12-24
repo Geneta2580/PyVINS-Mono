@@ -55,21 +55,36 @@ You must compile GTSAM 4.3a from source or install a compatible binary.
 
 Before running the system, ensure your dataset is organized with the specific directory structure shown below.
 
+### 1. EuRoC MAV Dataset
+For the EuRoC dataset, this project supports the **standard raw format**. You do not need to reorganize the files but just simply extract the downloaded dataset.
+
 **Required Directory Structure:**
 ```text
-Dataset_Root_Directory/
-├── image/
-│   ├── data/          # Contains image files named by timestamp
-│   └── data.csv       # Contains mapping between timestamps and filenames
-└── imu/
-    └── data.csv       # IMU measurements
+EuRoC_Dataset_Root/       # e.g., MH_01_easy
+└── mav0/
+    ├── cam0/             # Left camera data
+    ├── cam1/             # Right camera data
+    ├── imu0/             # IMU measurements
+    ├── leica0/           # Ground truth (Leica)
+    └── state_groundtruth_estimate0/
 ```
-
-* image/data.csv format: Must contain the correspondence between timestamps and image filenames.
 
 * Tested Datasets: This project has been currently tested and verified on the EuRoC MAV Dataset:
 * `MH_01_Easy`
 * `MH_02_Easy`
+
+### 2. KITTI Dataset
+For KITTI, use the Raw Data (Unsynced + Unrectified) format. Ensure your dataset root contains the image and OXTS folders directly.
+
+**Required Directory Structure:**
+```text
+KITTI_Dataset_Root/       # e.g., 2011_09_26_drive_0005_extract
+├── image_00/             # Grayscale Left
+├── image_01/             # Grayscale Right
+├── image_02/             # Color Left
+├── image_03/             # Color Right
+└── oxts/                 # GPS/IMU Data
+```
 
 ## 🚀 Usage
 ### 1. Configuration

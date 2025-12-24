@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/kitti/2011_09_30_drive_0028_extract"
+dataset_path: "/home/geneta/dataset/source_dataset/kitti/2011_09_30_drive_0027_extract"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "kitti"
@@ -37,11 +37,13 @@ max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
 min_dist: 30
 
 # 相机内参
+# unsync
 cam_intrinsics: [959.198, 0.000, 694.438,
                  0.000, 952.932, 241.679,
                  0.000, 0.000, 1.000]
 
 # 相机畸变参数
+use_undistort: True
 distortion_model: "radtan"
 distortion_coefficients: [-0.37256370, 0.19798030, 0.00018000, 0.00125059, -0.06608481]
 
@@ -89,6 +91,9 @@ T_bc: [0.00781297503, -0.00427919894, 0.99996032883, 1.14389870576,
        0.01483429622, -0.99988022576, -0.00439476150, 0.72654604549,
        0.00000000000, 0.00000000000, 0.00000000000, 1.00000000000]
 
+# 视觉噪声sigma
+visual_noise_sigma: 2.0
+
 # 是否使用深度降权
 use_depth_weight: False
 
@@ -107,6 +112,9 @@ use_imu_output: False
 
 # 是否可视化
 enable_viewer: True
+
+# 输出日志文件路径
+log_dir: "output/log"
 
 # 输出轨迹文件路径
 trajectory_output_path: "output/estimated_trajectory.txt" 

@@ -596,6 +596,7 @@ class Estimator(threading.Thread):
         curr_kf.set_global_pose(T_ref_curr)
 
         # 使用PnP计算其他KF位姿
+        failed_pnp_count = 0
         for kf in initial_keyframes:
             # 跳过参考KF和最新KF
             if kf.get_id() in [ref_kf.get_id(), curr_kf.get_id()]:
@@ -605,6 +606,13 @@ class Estimator(threading.Thread):
             # print(f"pose: {pose}")
             if success_pnp:
                 kf.set_global_pose(pose)
+            else:
+                failed_pnp_count += 1
+                print(f"【Visual Init】: Warning: PnP failed for KF {kf.get_id()}")
+
+        if failed_pnp_count > 0:
+            print(f"【Visual Init】: {failed_pnp_count} keyframes failed PnP. They will be skipped in IMU alignment.")
+            return False, None, None, None, None, None
 
         print(f"【Visual Init】: Success! Map has {len(sfm_landmarks)} landmarks.")
         

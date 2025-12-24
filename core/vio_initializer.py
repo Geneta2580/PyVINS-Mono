@@ -93,10 +93,12 @@ class VIOInitializer:
 
             # 获取视觉KF的旋转和平移(注意这里是带外参的)
             T_i_pose = kf_start.get_global_pose()
+            # print(f"【System Init】: T_i_pose: {T_i_pose}")
             R_i = (T_i_pose @ np.linalg.inv(T_bc))[:3, :3]  # R_i = R_c0_bi (IMU旋转)
             t_i = T_i_pose[:3, 3]                         # t_i = p_c0_ci (相机平移)
 
             T_j_pose = kf_end.get_global_pose()
+            # print(f"【System Init】: T_j_pose: {T_j_pose}")
             R_j = (T_j_pose @ np.linalg.inv(T_bc))[:3, :3]  # R_j = R_c0_bj (IMU旋转)
             t_j = T_j_pose[:3, 3]                         # t_j = p_c0_cj (相机平移)
 
@@ -368,11 +370,11 @@ class VIOInitializer:
     @staticmethod # 静态方法，不需要实例化，不需要传递self
     def initialize(keyframes, imu_factors, imu_processor, gravity_magnitude, T_bc):
         bg0 = VIOInitializer.solve_gyro_bias(keyframes, imu_factors, T_bc)
-        if bg0 is None:
-            print("【System Init】: Failed to solve gyro bias")
-            return False, None, None, None, None
-
-        repropagated_imu_factors = VIOInitializer.repropagate_imu(imu_factors, imu_processor, bg0) # 这里执行了重传播，原地修改imu_factors
+        # if bg0 is None:
+        #     print("【System Init】: Failed to solve gyro bias, using zero bias")
+        # bg0 = np.zeros(3)  # 失败时使用零偏置作为后备
+        
+        repropagated_imu_factors = VIOInitializer.repropagate_imu(imu_factors, imu_processor, bg0)
         if not repropagated_imu_factors:
             print("【System Init】: Repropagation failed.")
             return False, None, None, None, None

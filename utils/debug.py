@@ -7,14 +7,14 @@ import os
 import csv
 
 class Debugger:
-    def __init__(self, file_prefix="debug", column_names=None):
+    def __init__(self, config, file_prefix="debug", column_names=None):
         if column_names is None:
             column_names = ["timestamp", "value"]
         
         self.column_names = list(column_names) # 使用传入的列名
 
         # 输出文件地址, 格式为: output/file_prefix_timestamp.csv
-        log_dir = "output"
+        log_dir = config.get('log_dir')
         use_timestamp = True # 是否在文件名中添加时间戳
         self.log_path = self._initialize_log_file(file_prefix, log_dir, use_timestamp)
         self.log_file = open(self.log_path, 'w', newline='')
@@ -34,6 +34,8 @@ class Debugger:
         
         log_path = os.path.join(log_dir, file_name)
 
+        os.makedirs(log_dir, exist_ok=True)
+        
         # --- 3. 打开文件并写入表头 ---
         # 使用'w'模式（写入）和 newline='' 来防止写入空行
         self.file_handle = open(log_path, 'w', newline='', encoding='utf-8')
