@@ -338,8 +338,6 @@ class VIOInitializer:
             
             kf.set_global_pose(T_w_bi)
 
-            # TODO?:对齐到世界系原点
-
             # 打印初始化的轨迹
             # timestamp = kf.get_timestamp()
             # pose = kf.get_global_pose()

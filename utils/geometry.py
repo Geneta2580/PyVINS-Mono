@@ -82,3 +82,45 @@ def caculate_rotation_matrix_from_two_vectors(vec1, vec2):
     r = Rotation.from_rotvec(rot_vec)
     R0 = r.as_matrix()
     return R0
+
+# 世界坐标系到逆深度坐标系（球面坐标系）
+def world_to_inv_depth(point_w_np, T_wc_np):
+    R_wc = T_wc_np[:3, :3]
+    t_wc = T_wc_np[:3, 3]
+
+    point_c = R_wc.T @ (point_w_np - t_wc)
+
+    x, y, z = point_c[0], point_c[1], point_c[2]
+
+    norm = np.linalg.norm(point_c)
+    rho = 1.0 / norm if norm > 1e-6 else 1e-6
+
+    theta = np.arctan2(x, z)
+
+    val = y / norm
+    val = np.clip(val, -1.0, 1.0)
+    phi = np.arcsin(val)
+
+    return np.array([theta, phi, rho])
+
+# 逆深度坐标系到世界坐标系
+def inv_depth_to_world(inv_params_np, T_wc_np):
+    theta, phi, rho = inv_params_np[0], inv_params_np[1], inv_params_np[2]
+    if rho < 1e-7: rho = 1e-7 # 防止除以零
+    
+    # 1. 在相机坐标系下重建点
+    # 逆运算 _world_to_inv_depth 中的公式
+    r = 1.0 / rho
+    cos_phi = np.cos(phi)
+    sin_phi = np.sin(phi)
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    
+    x = r * cos_phi * sin_theta
+    y = r * sin_phi
+    z = r * cos_phi * cos_theta
+    
+    point_c = np.array([x, y, z])
+    point_w = T_wc_np[:3, :3] @ point_c + T_wc_np[:3, 3]
+
+    return point_w

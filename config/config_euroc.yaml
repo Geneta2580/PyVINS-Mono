@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_01_easy"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_03_medium"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -42,7 +42,7 @@ cam_intrinsics: [458.654, 0.000, 367.215,
                  0.000, 0.000, 1.000]
 
 # 相机畸变参数
-distortion_model: "fisheye"
+distortion_model: "radtan"
 distortion_coefficients: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
 
 # RANSAC相关参数
@@ -60,8 +60,8 @@ gravity: 9.81
 # 注意这里只是sigma，不是sigma^2
 accel_noise_sigma: 0.008          # 从0.002改为0.008
 accel_bias_rw_sigma: 0.0003        # 从0.0003改为0.001
-gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
+gyro_noise_sigma: 0.004        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.0004     # 从0.000019393改为0.00008
 
 
 # ============================================= 地图管理参数 =============================================
@@ -72,8 +72,8 @@ min_parallax_angle_deg: 5.0 # 三角化新地图点最小视差角度
 triangulation_max_reprojection_error: 40.0 # 三角化新地图点最大重投影误差
 
 # 优化新地图点最大重投影误差(只有开启优化后抑制不良优化点才有效)
-optimization_max_reprojection_error: 40.0 # 优化新地图点最大重投影误差
-optimization_max_delete_reprojection_error: 1000.0 # 优化新地图点最大删除重投影误差
+optimization_max_reprojection_error: 60.0 # 优化新地图点最大重投影误差
+optimization_max_delete_reprojection_error: 100.0 # 优化新地图点最大删除重投影误差
 
 
 # ============================================= 后端配置参数 =============================================

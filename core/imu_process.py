@@ -20,7 +20,7 @@ class IMUProcessor:
 
         self.params.setAccelerometerCovariance(np.eye(3) * accel_noise_sigma**2) # 加计协方差
         self.params.setGyroscopeCovariance(np.eye(3) * gyro_noise_sigma**2) # 陀螺协方差
-        self.params.setIntegrationCovariance(np.eye(3) * 1e-6) # 预积分协方差，通常可以设一个很小的值
+        self.params.setIntegrationCovariance(np.eye(3) * 1e-8) # 预积分协方差，通常可以设一个很小的值
 
         self.params.setBiasAccCovariance(np.eye(3) * accel_bias_rw_sigma**2) # 加计零偏随机游走
         self.params.setBiasOmegaCovariance(np.eye(3) * gyro_bias_rw_sigma**2) # 陀螺零偏随机游走

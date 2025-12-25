@@ -48,7 +48,7 @@ distortion_model: "radtan"
 distortion_coefficients: [-0.37256370, 0.19798030, 0.00018000, 0.00125059, -0.06608481]
 
 # RANSAC相关参数
-use_ransac: False
+use_ransac: True
 ransac_threshold: 1.0
 ransac_prob: 0.999
 

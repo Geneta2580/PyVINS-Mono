@@ -60,10 +60,10 @@ visualize: True
 gravity: 9.81
 
 # 注意这里只是sigma，不是sigma^2
-accel_noise_sigma: 0.1          # 从0.002改为0.008
-accel_bias_rw_sigma: 0.01        # 从0.0003改为0.001
-gyro_noise_sigma: 0.1        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.01     # 从0.000019393改为0.00008
+accel_noise_sigma: 0.008          # 从0.002改为0.008
+accel_bias_rw_sigma: 0.0003        # 从0.0003改为0.001
+gyro_noise_sigma: 0.0002        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.00002     # 从0.000019393改为0.00008
 
 
 # ============================================= 地图管理参数 =============================================
@@ -71,7 +71,7 @@ gyro_bias_rw_sigma: 0.01     # 从0.000019393改为0.00008
 max_depth: 400 # 地图点三角化深度检查是否正常
 min_depth: 0.4
 min_parallax_angle_deg: 7.0 # 三角化新地图点最小视差角度
-triangulation_max_reprojection_error: 40.0 # 三角化新地图点最大重投影误差
+triangulation_max_reprojection_error: 60.0 # 三角化新地图点最大重投影误差
 
 # 优化新地图点最大重投影误差(只有开启优化后抑制不良优化点才有效)
 optimization_max_reprojection_error: 40.0 # 优化新地图点最大重投影误差
