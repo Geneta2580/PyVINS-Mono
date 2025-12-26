@@ -2,9 +2,10 @@ import cv2
 import numpy as np
 
 class SfMProcessor:
-    def __init__(self, cam_intrinsics):
+    def __init__(self, config, cam_intrinsics):
+        self.reprojection_threshold = config.get('initial_sfm_reprojection_threshold', 3.0)
         self.cam_intrinsics = cam_intrinsics
-        
+        self.config = config
         self.keyframes = {}
         self.last_kf = None
         self.last_kf_pts = None
@@ -126,7 +127,7 @@ class SfMProcessor:
         return True, T_world_cam
 
     
-    def filter_points_by_reprojection(self, points_3d, p1_matched, p2_matched, R, t, threshold=1.5):
+    def filter_points_by_reprojection(self, points_3d, p1_matched, p2_matched, R, t):
         if len(points_3d) == 0:
             return np.array([]), np.array([], dtype=bool)
 
@@ -143,7 +144,7 @@ class SfMProcessor:
         error2 = np.linalg.norm(p2_matched - reprojected_pts2.reshape(-1, 2), axis=1)
         
         # 4. 创建掩码并过滤
-        reprojection_mask = (error1 < threshold) & (error2 < threshold)
+        reprojection_mask = (error1 < self.reprojection_threshold) & (error2 < self.reprojection_threshold)
         filtered_points_3d = points_3d[reprojection_mask]
         
         return filtered_points_3d, reprojection_mask    

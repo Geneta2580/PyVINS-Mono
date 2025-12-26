@@ -7,6 +7,7 @@ import queue
 from utils.dataloader import ImuMeasurement
 from core.visual_process import VisualProcessor
 from core.imu_process import IMUProcessor
+from utils.debug import Debugger
 
 class FeatureTracker(threading.Thread):
     def __init__(self, config, dataloader, output_queue):
@@ -23,6 +24,13 @@ class FeatureTracker(threading.Thread):
 
         # 视觉处理模块
         self.visual_processor = VisualProcessor(config)
+
+        # 日志记录（从VisualProcessor移到这里）
+        log_columns = [
+            "timestamp", "feature_count", "long_track_ratio", "mean_parallax", "is_kf", "is_stationary",
+            "is_kf_visual", "is_kf_time", "is_kf_final",
+        ]
+        self.logger = Debugger(self.config, file_prefix="feature_tracker", column_names=log_columns)
 
     def start(self):
         self.is_running = True
@@ -62,18 +70,55 @@ class FeatureTracker(threading.Thread):
                 image_data = data[0]
                 print(f"【FeatureTracker】Image data: {data[1]}")
                 
-                # 光流追踪特征点
-                undistorted_features, feature_ids, is_kf_visual, is_stationary = self.visual_processor.track_features(image_data)
+                # 光流追踪特征点（返回stats和viz_payload）
+                undistorted_features, feature_ids, stats, viz = self.visual_processor.track_features(image_data, timestamp)
 
-                is_kf = is_kf_visual
-                # 判断关键帧逻辑3：时间条件
+                # 视觉判定（来自VisualProcessor）
+                is_kf_visual = int(stats["is_kf_visual"])
+
+                # 时间判定和最终判定
+                is_kf_time = 0
+                is_kf_final = is_kf_visual
                 if self.last_kf_timestamp is not None:
-                    # 间隔大于最大关键帧间隔，强制插入关键帧
-                    is_kf_time_max = (timestamp - self.last_kf_timestamp) > self.config.get('max_kf_interval', 5)
-                    is_kf_time_min = (timestamp - self.last_kf_timestamp) > self.config.get('min_kf_interval', 0.2)
-                    # 视觉条件满足且间隔大于最小关键帧间隔才能插入关键帧
-                    is_kf_temp = is_kf_visual and is_kf_time_min
-                    is_kf = is_kf_temp or is_kf_time_max
+                    dt = timestamp - self.last_kf_timestamp
+                    is_kf_time_max = int(dt > self.config.get('max_kf_interval', 5))
+                    is_kf_time_min = int(dt > self.config.get('min_kf_interval', 0.2))
+                    # 视觉条件满足且间隔大于最小关键帧间隔才能插入关键帧，或者超过最大间隔强制插入
+                    is_kf_final = int((is_kf_visual and is_kf_time_min) or is_kf_time_max)
+                    is_kf_time = int(is_kf_time_max or is_kf_time_min)
+                else:
+                    # 第一帧：视觉判定就是最终判定
+                    is_kf_final = int(is_kf_visual)
+                    is_kf_time = 0
+
+                is_stationary = int(stats["is_stationary"])
+
+                # 可视化：使用最终is_kf_final，并接收返回的vis_img
+                vis_img = None
+                if self.visual_processor.visualize_flag:
+                    vis_img = self.visual_processor.visualize_tracking(
+                        image_data,
+                        viz["good_prev"], viz["good_curr"], viz["good_ids"],
+                        is_kf_final, is_stationary,
+                        stats["mean_parallax"],
+                        timestamp,
+                        stats["prev_total_count"],
+                        stats["long_track_ratio"]
+                    )
+
+                # 写入日志：保留原有字段（is_kf保持视觉判定语义），新增3个is_kf字段
+                self.logger.log_state({
+                    "timestamp": float(stats["timestamp"]),
+                    "feature_count": int(stats["feature_count"]),
+                    "long_track_ratio": float(stats["long_track_ratio"]),
+                    "mean_parallax": float(stats["mean_parallax"]),
+                    "is_kf": int(is_kf_visual),              # 保持原"视觉is_kf"的语义
+                    "is_stationary": int(is_stationary),
+
+                    "is_kf_visual": int(is_kf_visual),
+                    "is_kf_time": int(is_kf_time),
+                    "is_kf_final": int(is_kf_final),
+                })
 
                 # 处理图像信息
                 visual_features = {
@@ -81,8 +126,9 @@ class FeatureTracker(threading.Thread):
                     'feature_ids': feature_ids,
                     'timestamp': timestamp,
                     'image': image_data,
-                    'is_kf': is_kf,
-                    'is_stationary': is_stationary
+                    'is_kf': is_kf_final,
+                    'is_stationary': is_stationary,
+                    'vis_img': vis_img,  # visualize_tracking的返回值
                 }
 
                 try:
@@ -90,7 +136,7 @@ class FeatureTracker(threading.Thread):
                 except queue.Full:
                     pass
 
-                if is_kf:
+                if is_kf_final:
                     self.last_kf_timestamp = timestamp
                     print(f"【FeatureTracker】Keyframe: {visual_features['timestamp']}")
         

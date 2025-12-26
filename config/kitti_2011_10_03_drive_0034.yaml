@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/datasets/kitti/kitti_raw/2011_09_30/2011_09_30_drive_0033_sync"
+dataset_path: "/home/datasets/kitti/kitti_raw/2011_10_03/2011_10_03_drive_0034_sync"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "kitti"
@@ -21,7 +21,7 @@ initial_parallax: 70
 initial_sfm_reprojection_threshold: 3.0
 
 # 选择关键帧最小视差 10
-min_parallax: 15
+min_parallax: 18
 
 # 静止视差
 min_stationary_parallax: 3.0
@@ -30,19 +30,19 @@ min_stationary_parallax: 3.0
 max_features_to_detect: 300
 
 # 最小跟踪比例
-min_track_ratio: 0.5
+min_track_ratio: 0.55
 
 # 关键帧时间间隔
 min_kf_interval: 0.3 # 最小关键帧时间间隔(s) 0.2
 max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
 
 # 特征点间的最小像素距离
-min_dist: 30
+min_dist: 20
 
 # 相机内参
 # sync
-cam_intrinsics: [707.0912, 0.000, 601.8873, 
-                 0.000, 707.0912, 183.1104, 
+cam_intrinsics: [718.856, 0.000, 607.1928, 
+                 0.000, 718.856, 185.2157, 
                  0.000, 0.000, 1.000]
 
 # 相机畸变参数
@@ -51,7 +51,7 @@ distortion_model: "radtan"
 distortion_coefficients: [-0.37256370, 0.19798030, 0.00018000, 0.00125059, -0.06608481]
 
 # RANSAC相关参数
-use_ransac: True
+use_ransac: False
 ransac_threshold: 1.0
 ransac_prob: 0.999
 
@@ -65,19 +65,19 @@ gravity: 9.81
 # 注意这里只是sigma，不是sigma^2
 accel_noise_sigma: 0.001          # 从0.002改为0.008
 accel_bias_rw_sigma: 0.0008        # 从0.0003改为0.001
-gyro_noise_sigma: 0.0001        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.00008     # 从0.000019393改为0.00008
+gyro_noise_sigma: 0.0005        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.00001     # 从0.000019393改为0.00008
 
 # accel_noise_sigma: 0.03          # 从0.002改为0.008
-# accel_bias_rw_sigma: 0.0008        # 从0.0003改为0.001
-# gyro_noise_sigma: 0.0001        # 从0.00016968改为0.0008
+# accel_bias_rw_sigma: 0.003        # 从0.0003改为0.001
+# gyro_noise_sigma: 0.0005        # 从0.00016968改为0.0008
 # gyro_bias_rw_sigma: 0.00008     # 从0.000019393改为0.00008
 
 # ============================================= 地图管理参数 =============================================
 # 三角化新地图点条件检查
 max_depth: 400 # 地图点三角化深度检查是否正常
 min_depth: 0.8
-min_parallax_angle_deg: 7.0 # 三角化新地图点最小视差角度
+min_parallax_angle_deg: 5.0 # 三角化新地图点最小视差角度
 triangulation_max_reprojection_error: 60.0 # 三角化新地图点最大重投影误差
 
 # 优化新地图点最大重投影误差(只有开启优化后抑制不良优化点才有效)
@@ -93,9 +93,9 @@ init_window_size: 10
 lag_window_size: 9 # 10-1
 
 # 初始化外参
-T_bc: [0.00781297503, -0.00427919894, 0.99996032883, 1.14389870576,
-       -0.99985947189, -0.01486804706, 0.00774856027, -0.31271847125,
-       0.01483429622, -0.99988022576, -0.00439476150, 0.72654604549,
+T_bc: [ 0.00875115955, -0.00479609093, 0.99995026794, 1.10224312308,
+       -0.99986428246, -0.01400249499, 0.00868324724, -0.31907194404,
+       0.01396014779, -0.99989043995, -0.00491797836, 0.74606587934,
        0.00000000000, 0.00000000000, 0.00000000000, 1.00000000000]
 
 # 视觉噪声sigma

@@ -125,19 +125,37 @@ class VisualProcessor:
 
 
     # 光流追踪特征点
-    def track_features(self, image):
+    def track_features(self, image, timestamp):
         curr_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         # 一些局部变量的初始化
         is_kf = False
         is_stationary = False
         new_pts = None
 
+        # 记录上一帧总点数（用于计算tracking_rate）
+        prev_total_count = 0 if self.prev_pt_ids is None else len(self.prev_pt_ids)
+
         # 第一帧处理逻辑，必定为关键帧
         if self.prev_gray is None or self.prev_pts is None or len(self.prev_pts) == 0:
             self.prev_gray = curr_gray
             self.prev_pts = self.detect_features(self.prev_gray, self.max_features_to_detect) # (N, 1, 2)
             if self.prev_pts is None:
-                return None, None, False, False
+                # 检测失败时返回空结构
+                empty_stats = {
+                    "timestamp": float(timestamp),
+                    "feature_count": 0,
+                    "long_track_ratio": 0.0,
+                    "mean_parallax": 0.0,
+                    "is_stationary": 0,
+                    "is_kf_visual": 0,
+                    "prev_total_count": 0,
+                }
+                empty_viz = {
+                    "good_prev": np.empty((0, 1, 2)),
+                    "good_curr": np.empty((0, 1, 2)),
+                    "good_ids": np.array([]),
+                }
+                return None, None, empty_stats, empty_viz
 
             # 分配初始ID
             num_new_features = len(self.prev_pts)
@@ -153,11 +171,27 @@ class VisualProcessor:
             else:
                 undistorted_pts = self.prev_pts.reshape(-1, 2) # (N, 2)
 
-            # 可视化第一帧
-            if self.visualize_flag:
-                self.visualize_tracking(image, self.prev_pts, self.prev_pts, self.prev_pt_ids, True, False, 0.0)
+            # 第一帧的统计信息
+            stats = {
+                "timestamp": float(timestamp),
+                "feature_count": int(len(self.prev_pt_ids)),
+                "long_track_ratio": 0.0,
+                "mean_parallax": 0.0,
+                "is_stationary": 0,
+                "is_kf_visual": 1,
+                "prev_total_count": 0,
+            }
+            viz_payload = {
+                "good_prev": self.prev_pts,
+                "good_curr": self.prev_pts,
+                "good_ids": self.prev_pt_ids,
+            }
 
-            return undistorted_pts, self.prev_pt_ids, True, False
+            # 可视化第一帧（不再在这里调用，由FeatureTracker调用）
+            # if self.visualize_flag:
+            #     self.visualize_tracking(image, self.prev_pts, self.prev_pts, self.prev_pt_ids, True, False, 0.0, timestamp)
+
+            return undistorted_pts, self.prev_pt_ids, stats, viz_payload
 
         # 非第一帧处理逻辑       
         # 正向光流
@@ -280,39 +314,37 @@ class VisualProcessor:
 
         # Measure displacement to mean parallax
         displacement = np.linalg.norm(good_curr.reshape(-1, 2) - good_prev.reshape(-1, 2), axis=1)
-        mean_parallax = np.mean(displacement) if len(displacement) > 0 else 0
+        mean_parallax = float(np.mean(displacement)) if len(displacement) > 0 else 0.0
 
-        # 判断关键帧视觉条件1：
-        # 平均视差大于最小视差，则满足视觉条件
-        if mean_parallax > self.min_parallax:
-            is_kf = True
+        # is_stationary (0/1)
+        is_stationary = int(mean_parallax < self.min_stationary_parallax)
 
-        if mean_parallax < self.min_stationary_parallax:
-            is_stationary = True
-
-        # 判断关键帧视觉条件2：
-        # 统计追踪时间长的特征点比例，如果比例小于最小长追踪比例，则满足视觉条件
+        # long_track_ratio
+        long_track_ratio = 0.0
         if len(good_ids) > 0:
             long_track_count = sum(1 for fid in good_ids if self.feature_ages.get(fid, 0) >= self.long_track_age_threshold)
-            long_track_ratio = long_track_count / len(good_ids)
-            if long_track_ratio < self.min_long_track_ratio:
-                is_kf = True
+            long_track_ratio = float(long_track_count / len(good_ids))
+
+        # 判断关键帧视觉条件（is_kf_visual）
+        is_kf_visual = 0
+        # 条件1：平均视差大于最小视差
+        if mean_parallax > self.min_parallax:
+            is_kf_visual = 1
+        # 条件2：长追踪点比例小于最小长追踪比例
+        if len(good_ids) > 0 and long_track_ratio < self.min_long_track_ratio:
+            is_kf_visual = 1
 
         num_current_features = len(good_curr)
 
         final_pts = good_curr
         final_ids = good_ids
         
-        # 可视化，保持数组长度一致
-        if self.visualize_flag:
-            self.visualize_tracking(image, good_prev, good_curr, good_ids, is_kf, is_stationary, mean_parallax)
-
         # 补充特征点
         if len(good_curr) < self.max_features_to_detect:
             # 判断关键视觉条件3：
             # 跟踪到的特征点数量小于最小跟踪比例（新特征点数量大于一定比例），则认为是关键帧
             if len(good_curr) < (self.max_features_to_detect * self.min_track_ratio):
-                is_kf = True
+                is_kf_visual = 1
 
             # 使用重过滤生成的mask来检测新特征点
             num_new_features_needed = self.max_features_to_detect - num_current_features
@@ -341,7 +373,23 @@ class VisualProcessor:
         else:
             undistorted_final_pts = final_pts.reshape(-1, 2) # (N, 2)
 
-        return undistorted_final_pts, final_ids, is_kf, is_stationary
+        # 准备返回的统计信息和可视化数据
+        stats = {
+            "timestamp": float(timestamp),
+            "feature_count": int(len(good_ids)),
+            "long_track_ratio": float(long_track_ratio),
+            "mean_parallax": float(mean_parallax),
+            "is_stationary": int(is_stationary),
+            "is_kf_visual": int(is_kf_visual),
+            "prev_total_count": int(prev_total_count),
+        }
+        viz_payload = {
+            "good_prev": good_prev,
+            "good_curr": good_curr,
+            "good_ids": good_ids,
+        }
+
+        return undistorted_final_pts, final_ids, stats, viz_payload
 
     def get_age_color(self, age):
         """直接RGB插值"""
@@ -354,9 +402,12 @@ class VisualProcessor:
         
         return (b, g, r)  # BGR格式
     
-    def visualize_tracking(self, image, good_prev, good_curr, good_ids, is_kf, is_stationary, mean_parallax):
+    def visualize_tracking(self, image, good_prev, good_curr, good_ids, is_kf, is_stationary, mean_parallax, timestamp, prev_total_count=0, long_track_ratio=0.0):
         """
         可视化特征点追踪结果
+        
+        Returns:
+            vis_img: 可视化后的图像（numpy数组）
         """
         vis_img = image.copy()
         
@@ -382,23 +433,18 @@ class VisualProcessor:
             cv2.putText(vis_img, label, (p2_t[0]+5, p2_t[1]-5), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
         
-        # 显示统计信息
+        # 显示统计信息（不再写入日志，日志由FeatureTracker负责）
         if len(good_ids) > 0:
-            long_track_count = sum(1 for fid in good_ids 
-                                  if self.feature_ages.get(fid, 0) >= self.long_track_age_threshold)
-            long_track_ratio = long_track_count / len(good_ids)
-            
             # 计算追踪成功率
-            if hasattr(self, 'prev_pt_ids') and len(self.prev_pt_ids) > 0:
-                tracking_rate = len(good_ids) / len(self.prev_pt_ids)
-                info_text1 = (f"Features: {len(good_ids)}/{len(self.prev_pt_ids)} ({tracking_rate:.0%}) | "
+            if prev_total_count > 0:
+                tracking_rate = len(good_ids) / prev_total_count
+                info_text1 = (f"Features: {len(good_ids)}/{prev_total_count} ({tracking_rate:.0%}) | "
                              f"KF: {is_kf} | "
                              f"Stationary: {is_stationary} | Parallax: {mean_parallax:.2f}")
             else:
                 info_text1 = f"Features: {len(good_ids)} | Long: {long_track_ratio:.0%} | KF: {is_kf} | Stationary: {is_stationary} | Parallax: {mean_parallax:.2f}"
         else:
             info_text1 = f"Features: 0 | KF: {is_kf}"
-        
 
         cv2.putText(vis_img, info_text1, (10, 30), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
@@ -406,3 +452,5 @@ class VisualProcessor:
         # 显示图像
         cv2.imshow("Optical Flow", vis_img)
         cv2.waitKey(1)
+        
+        return vis_img

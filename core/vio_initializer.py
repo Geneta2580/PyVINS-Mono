@@ -102,6 +102,23 @@ class VIOInitializer:
             R_j = (T_j_pose @ np.linalg.inv(T_bc))[:3, :3]  # R_j = R_c0_bj (IMU旋转)
             t_j = T_j_pose[:3, 3]                         # t_j = p_c0_cj (相机平移)
 
+            # ======================= 负数尺度debug =======================
+            # # 获取视觉位移 (世界系)
+            # t_diff_world = t_j - t_i
+            # # 投影到 Body 系 (使用你算出的 R_i)
+            # t_diff_body_vis = R_i.T @ t_diff_world
+
+            # # 获取 IMU 位移 (Body 系)
+            # t_diff_body_imu = pim.deltaPij()
+
+            # # 计算点积
+            # dot_prod = np.dot(t_diff_body_vis.flatten(), t_diff_body_imu.flatten())
+
+            # print(f"Frame {i}->{i+1}: Dot Product = {dot_prod:.4f}")
+            # print(f"  Vis Vec (Body): {t_diff_body_vis.flatten()}")
+            # print(f"  IMU Vec (Body): {t_diff_body_imu.flatten()}")
+            # ======================= 负数尺度debug =======================
+
             # print(f"【System Init】: t_i: {t_i}")
             # print(f"【System Init】: t_j: {t_j}")
 

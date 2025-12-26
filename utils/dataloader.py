@@ -36,7 +36,7 @@ class UnifiedDataloader:
         else:
             print("【Warning】: Dataframe is empty!")
 
-        self.current_idx = 0
+        self.current_idx = 1200
 
     def _load_euroc(self) -> pd.DataFrame:
         """读取EuRoC格式数据 (原始单位: 纳秒)"""
@@ -178,7 +178,7 @@ class UnifiedDataloader:
                         raw_vals = np.fromfile(file_path, sep=' ')
                         
                         # KITTI IMU data extraction
-                        accel = raw_vals[11:14] 
+                        accel = raw_vals[11:14]
                         gyro = raw_vals[17:20]
                         
                         imu_vector = np.concatenate((gyro, accel))

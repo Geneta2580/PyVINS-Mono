@@ -11,7 +11,7 @@ from datatype.localmap import LocalMap
 from datatype.landmark import Landmark, LandmarkStatus
 from .imu_process import IMUProcessor
 from .sfm_processor import SfMProcessor
-from .viewer import Viewer3D
+# from .viewer import Viewer3D
 from utils.debug import Debugger
 from .vio_initializer import VIOInitializer
 
@@ -35,7 +35,7 @@ class Estimator(threading.Thread):
         cam_intrinsics_raw = self.config.get('cam_intrinsics', np.eye(3).flatten().tolist())
         self.cam_intrinsics = np.asarray(cam_intrinsics_raw).reshape(3, 3)
 
-        self.sfm_processor = SfMProcessor(self.cam_intrinsics)
+        self.sfm_processor = SfMProcessor(self.config, self.cam_intrinsics)
 
         self.next_kf_id = 0
         self.next_normal_frame_id = 0

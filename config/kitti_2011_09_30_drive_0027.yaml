@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/kitti/2011_09_30_drive_0027_sync"
+dataset_path: "/home/datasets/kitti/kitti_raw/2011_09_30/2011_09_30_drive_0027_sync"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "kitti"
@@ -15,7 +15,10 @@ dataset_type: "kitti"
 window_size: 10
 
 # 初始化三角化两帧视差阈值
-initial_parallax: 40
+initial_parallax: 70
+
+# 初始SFM三角化重投影误差阈值
+initial_sfm_reprojection_threshold: 3.0
 
 # 选择关键帧最小视差 10
 min_parallax: 20
@@ -60,10 +63,10 @@ visualize: True
 gravity: 9.81
 
 # 注意这里只是sigma，不是sigma^2
-accel_noise_sigma: 0.1          # 从0.002改为0.008
-accel_bias_rw_sigma: 0.01        # 从0.0003改为0.001
-gyro_noise_sigma: 0.1        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.01     # 从0.000019393改为0.00008
+accel_noise_sigma: 0.03          # 从0.002改为0.008
+accel_bias_rw_sigma: 0.003        # 从0.0003改为0.001
+gyro_noise_sigma: 0.001        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.0001     # 从0.000019393改为0.00008
 
 
 # ============================================= 地图管理参数 =============================================

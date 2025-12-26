@@ -17,6 +17,9 @@ window_size: 10
 # 初始化三角化两帧视差阈值
 initial_parallax: 70
 
+# 初始SFM三角化重投影误差阈值
+initial_sfm_reprojection_threshold: 3.0
+
 # 选择关键帧最小视差 10
 min_parallax: 20
 
