@@ -11,7 +11,7 @@ from datatype.localmap import LocalMap
 from datatype.landmark import Landmark, LandmarkStatus
 from .imu_process import IMUProcessor
 from .sfm_processor import SfMProcessor
-# from .viewer import Viewer3D
+from .viewer import Viewer3D
 from utils.debug import Debugger
 from .vio_initializer import VIOInitializer
 

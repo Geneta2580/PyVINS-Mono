@@ -12,7 +12,7 @@ from utils.dataloader import UnifiedDataloader
 from datatype.global_map import GlobalMap
 from core.estimator import Estimator
 from core.feature_tracker import FeatureTracker
-# from core.viewer import Viewer3D
+from core.viewer import Viewer3D
 
 def main():
     # 1. 配置参数解析
@@ -52,7 +52,7 @@ def main():
     # 实例化所有模块
     feature_tracker = FeatureTracker(config, data_loader, feature_tracker_to_estimator_queue)
     estimator = Estimator(config, feature_tracker_to_estimator_queue, estimator_to_viewer_queue, global_central_map)
-    # viewer = Viewer3D(estimator_to_viewer_queue) if config.get('enable_viewer', True) else None
+    viewer = Viewer3D(estimator_to_viewer_queue) if config.get('enable_viewer', True) else None
     
     # 3. 启动所有线程
     print("Starting all SLAM threads...")
@@ -60,8 +60,8 @@ def main():
     estimator.start()
 
     # 启动viewer线程
-    # if viewer:
-    #     viewer.start()
+    if viewer:
+        viewer.start()
 
     try:
         feature_tracker.join()
@@ -76,12 +76,12 @@ def main():
         # a. 首先，向所有子任务发送停止信号
         feature_tracker.shutdown()
         estimator.shutdown()
-        # if viewer:
-        #     viewer.shutdown()
+        if viewer:
+            viewer.shutdown()
 
         if feature_tracker.is_alive(): feature_tracker.join()
         if estimator.is_alive(): estimator.join()
-        # if viewer and viewer.is_alive(): viewer.join()
+        if viewer and viewer.is_alive(): viewer.join()
 
         cv2.destroyAllWindows()
         print("[Main Process] SLAM system shut down.")
