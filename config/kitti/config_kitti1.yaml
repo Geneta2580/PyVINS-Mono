@@ -1,0 +1,124 @@
+# ----------------------------------------------------------------------------
+# 数据集参数 (Dataset Parameters)
+# ----------------------------------------------------------------------------
+# 数据集根目录的路径
+# euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
+# tum：/home/pangjunxiang/dataset/TUM/freiburg1
+# kitti:
+dataset_path: "/home/geneta/dataset/source_dataset/kitti/2011_09_30_drive_0020_extract"
+
+# 支持euroc\tum\kitti数据集
+dataset_type: "kitti"
+
+# ============================================= 视觉前端配置参数 =============================================
+# 窗口大小
+window_size: 10
+
+# 初始化三角化两帧视差阈值
+initial_parallax: 70
+
+# 初始SFM三角化重投影误差阈值
+initial_sfm_reprojection_threshold: 1.5
+
+# 选择关键帧最小视差 10
+min_parallax: 20
+
+# 静止视差
+min_stationary_parallax: 3.0
+
+# 最大特征点数
+max_features_to_detect: 300
+
+# 最小跟踪比例
+min_track_ratio: 0.5
+
+# 最小跟踪比例
+min_kf_interval: 0.3 # 最小关键帧时间间隔(s) 0.2
+max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
+
+# 特征点间的最小像素距离
+min_dist: 25
+
+# 相机内参
+# unsync
+cam_intrinsics: [959.198, 0.000, 694.438,
+                 0.000, 952.932, 241.679,
+                 0.000, 0.000, 1.000]
+
+# 相机畸变参数
+use_undistort: True
+distortion_model: "radtan"
+distortion_coefficients: [-0.37256370, 0.19798030, 0.00018000, 0.00125059, -0.06608481]
+
+# RANSAC相关参数
+use_ransac: True
+ransac_threshold: 1.0
+ransac_prob: 0.999
+
+# 是否可视化追踪结果
+visualize: True
+
+# ============================================= IMU配置参数 =============================================
+# 重力模长
+gravity: 9.81
+
+# 注意这里只是sigma，不是sigma^2
+accel_noise_sigma: 0.03          # 从0.002改为0.008
+accel_bias_rw_sigma: 0.0005        # 从0.0003改为0.001
+gyro_noise_sigma: 0.005        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.0005     # 从0.000019393改为0.00008
+
+
+# ============================================= 地图管理参数 =============================================
+# 三角化新地图点条件检查
+max_depth: 400 # 地图点三角化深度检查是否正常
+min_depth: 0.4
+min_parallax_angle_deg: 7.0 # 三角化新地图点最小视差角度
+triangulation_max_reprojection_error: 60.0 # 三角化新地图点最大重投影误差
+
+# 优化新地图点最大重投影误差(只有开启优化后抑制不良优化点才有效)
+optimization_max_reprojection_error: 60.0 # 优化新地图点最大重投影误差
+optimization_max_delete_reprojection_error: 1000.0 # 优化新地图点最大删除重投影误差
+
+
+# ============================================= 后端配置参数 =============================================
+# 初始化窗口大小
+init_window_size: 10
+
+# 边缘化窗口大小
+lag_window_size: 9 # 10-1
+
+# 初始化外参
+T_bc: [0.00781297503, -0.00427919894, 0.99996032883, 1.14389870576,
+       -0.99985947189, -0.01486804706, 0.00774856027, -0.31271847125,
+       0.01483429622, -0.99988022576, -0.00439476150, 0.72654604549,
+       0.00000000000, 0.00000000000, 0.00000000000, 1.00000000000]
+
+# 视觉噪声sigma
+visual_noise_sigma: 2.0
+
+# 是否使用深度降权
+use_depth_weight: False
+
+# 深度降权参数
+depth_weight_base: 10.0    # 基础深度阈值（米），超过此深度开始降权
+depth_weight_max: 4.0     # 最大噪声倍数（深度很远时噪声增加到3倍）
+depth_weight_power: 1.5    # 深度权重指数，控制降权曲线的陡峭程度 
+
+# 新路标点噪声膨胀比例 (权重膨胀比例越大，新路标点权重越小)
+new_landmark_inflation_ratio: 1.0    
+
+
+# ============================================= 输出结果配置 =============================================
+# 是否使用IMU输出
+use_imu_output: False
+
+# 是否可视化
+enable_viewer: True
+
+# 输出日志文件路径
+log_dir: "output/log"
+
+# 输出轨迹文件路径
+trajectory_output_path: "output/estimated_trajectory.txt" 
+

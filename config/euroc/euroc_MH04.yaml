@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_01_easy"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_04_difficult"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -27,13 +27,13 @@ min_parallax: 10
 min_stationary_parallax: 0.5
 
 # 最大特征点数
-max_features_to_detect: 150
+max_features_to_detect: 200
 
 # 最小跟踪比例
 min_track_ratio: 0.5
 
 # 最小跟踪比例
-min_kf_interval: 0.2 # 最小关键帧时间间隔(s) 0.2
+min_kf_interval: 0.1 # 最小关键帧时间间隔(s) 0.2
 max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
 
 # 特征点间的最小像素距离
@@ -61,10 +61,10 @@ visualize: True
 gravity: 9.81
 
 # 注意这里只是sigma，不是sigma^2
-accel_noise_sigma: 0.008          # 从0.002改为0.008
-accel_bias_rw_sigma: 0.0003        # 从0.0003改为0.001
-gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
+accel_noise_sigma: 0.01          # 从0.002改为0.008
+accel_bias_rw_sigma: 0.005        # 从0.0003改为0.001
+gyro_noise_sigma: 0.0008        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.00008     # 从0.000019393改为0.00008
 
 
 # ============================================= 地图管理参数 =============================================

@@ -36,7 +36,7 @@ class UnifiedDataloader:
         else:
             print("【Warning】: Dataframe is empty!")
 
-        self.current_idx = 1200
+        self.current_idx = 0
 
     def _load_euroc(self) -> pd.DataFrame:
         """读取EuRoC格式数据 (原始单位: 纳秒)"""
