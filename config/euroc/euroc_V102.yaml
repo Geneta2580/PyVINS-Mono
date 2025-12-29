@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_04_difficult"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/V1_02_medium"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -20,8 +20,8 @@ initial_parallax: 70
 # 初始SFM三角化重投影误差阈值
 initial_sfm_reprojection_threshold: 1.5
 
-# 选择关键帧最小视差 10
-min_parallax: 10
+# 选择关键帧最小视差
+min_parallax: 8
 
 # 静止视差
 min_stationary_parallax: 0.5
@@ -30,10 +30,10 @@ min_stationary_parallax: 0.5
 max_features_to_detect: 200
 
 # 最小跟踪比例
-min_track_ratio: 0.5
+min_track_ratio: 0.6
 
 # 最小跟踪比例
-min_kf_interval: 0.2 # 最小关键帧时间间隔(s) 0.2
+min_kf_interval: 0.1 # 最小关键帧时间间隔(s) 0.2
 max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
 
 # 特征点间的最小像素距离
@@ -45,7 +45,7 @@ cam_intrinsics: [458.654, 0.000, 367.215,
                  0.000, 0.000, 1.000]
 
 # 相机畸变参数
-distortion_model: "fisheye"
+distortion_model: "radtan"
 distortion_coefficients: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
 
 # RANSAC相关参数
@@ -61,11 +61,15 @@ visualize: True
 gravity: 9.81
 
 # 注意这里只是sigma，不是sigma^2
-accel_noise_sigma: 0.01          # 从0.002改为0.008
-accel_bias_rw_sigma: 0.005        # 从0.0003改为0.001
-gyro_noise_sigma: 0.0008        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.00008     # 从0.000019393改为0.00008
+accel_noise_sigma: 0.05          # 从0.002改为0.008
+accel_bias_rw_sigma: 0.002        # 从0.0003改为0.001
+gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
 
+# accel_noise_sigma: 0.02          # 从0.002改为0.008
+# accel_bias_rw_sigma: 0.001        # 从0.0003改为0.001
+# gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
+# gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
 
 # ============================================= 地图管理参数 =============================================
 # 三角化新地图点条件检查
@@ -107,7 +111,7 @@ depth_weight_power: 1.5    # 深度权重指数，控制降权曲线的陡峭程
 new_landmark_inflation_ratio: 1.0    
 
 # 预优化最大重投影误差
-rejection_threshold: 200.0
+rejection_threshold: 400.0
 
 # ============================================= 输出结果配置 =============================================
 # 是否使用IMU输出

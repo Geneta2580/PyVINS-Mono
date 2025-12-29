@@ -35,6 +35,9 @@ class Backend:
         self.depth_weight_power = config.get('depth_weight_power', 1.5)  # 深度权重指数
         self.new_landmark_inflation_ratio = config.get('new_landmark_inflation_ratio', 5.0)
 
+        # 预优化最大重投影误差
+        self.rejection_threshold = config.get('rejection_threshold', 400.0)
+
         # 状态与id管理
         self.kf_id_to_gtsam_id = {}
         self.landmark_id_to_gtsam_id = {}
@@ -299,7 +302,6 @@ class Backend:
 
     def optimize_incremental(self, last_keyframe, new_keyframe, new_imu_factors, 
                             new_landmarks, new_visual_factors, initial_state_guess, is_stationary, oldest_kf_id_in_window):
-
         new_graph = gtsam.NonlinearFactorGraph()
         new_estimates = gtsam.Values()
         current_isam_values = self.smoother.calculateEstimate()
@@ -335,105 +337,147 @@ class Backend:
 
         # 添加新路标点顶点，注意这里添加的顶点只在new_estimates中还没有进入isam2的图
         # if not is_stationary:
-        for lm_id, lm_3d_pos in new_landmarks.items():
-            # 检查：如果ID映射已被删除（虽然不太可能发生在新landmark上，但为了安全起见）
-            if lm_id not in self.landmark_id_to_gtsam_id:
-                # 这个landmark可能在三角化后、优化前就被标记为删除了
-                # 这种情况极少见，但需要处理
-                continue
-                
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-            # ---!!!--- 在此处添加您要的日志 ---!!!---
-            # 打印即将送入优化器的路标点的值
-            # print(f"🕵️‍ 【Backend】: 优化器即将处理新路标点 L{lm_id}，其三角化初始值为: {lm_3d_pos}")
-            
+        added_new_landmark_gtsam_ids = set()
+
+        for lm_id, lm_3d_pos in new_landmarks.items():            
             # 增加一个NaN/Inf的显式检查，这对于调试崩溃至关重要
             if np.isnan(lm_3d_pos).any() or np.isinf(lm_3d_pos).any():
                 print(f"🔥 【Backend】[致命警告]: 路标点 L{lm_id} 的初始值无效 (NaN/Inf)！优化即将因此崩溃！")
                 continue  # 直接跳过无效的landmark
+
+            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+            # ---!!!--- 在此处添加您要的日志 ---!!!---
+            # 打印即将送入优化器的路标点的值
+            # print(f"🕵️‍ 【Backend】: 优化器即将处理新路标点 L{lm_id}，其三角化初始值为: {lm_3d_pos}")
 
             # 检查：1) 不在旧图中，2) 还没被添加过 确保顶点只被添加一次
             if not current_isam_values.exists(L(lm_gtsam_id)):
                 new_estimates.insert(L(lm_gtsam_id), lm_3d_pos)
                 # 添加新路标点的滑窗记录
                 new_window_stamps[L(lm_gtsam_id)] = float(kf_gtsam_id)
+                added_new_landmark_gtsam_ids.add(lm_gtsam_id)
         
         # 如果一个新路标点在 estimates 里，但所有因子都被 chi2 拒绝，必须将其从 estimates 移除
         # 否则会导致 iSAM2 遇到无约束变量而奇异/崩溃
         valid_new_landmarks = set()
 
-        # 添加重投影因子，前面已经添加了新路标点顶点，所以这里只需要添加历史点和新特征点的观测帧重投影因子
+        # -------------------------------------------------------------------------
+        # 【新增逻辑】: 因子防火墙 (Factor Firewall)
+        # -------------------------------------------------------------------------
+        
+        valid_visual_factors = []
+        bad_landmarks = set() # 记录坏点
+
         for kf_id, lm_id, pt_2d in new_visual_factors:
-            # 关键检查：如果landmark的ID映射已被删除，说明它已被标记为待清理，跳过
+            # 1. 基础检查
             if lm_id not in self.landmark_id_to_gtsam_id:
+                continue
+            
+            kf_gtsam_id = self._get_kf_gtsam_id(kf_id)
+            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+
+            # 2. 准备计算误差所需的临时变量
+            # 我们需要获取 kf 的位姿 和 lm 的位置
+            # 情况A: 变量在 new_estimates 中 (本帧新加的)
+            # 情况B: 变量在 current_isam_values 中 (老变量)
+            
+            pose = None
+            if new_estimates.exists(X(kf_gtsam_id)):
+                pose = new_estimates.atPose3(X(kf_gtsam_id))
+            elif current_isam_values.exists(X(kf_gtsam_id)):
+                pose = current_isam_values.atPose3(X(kf_gtsam_id))
+            
+            point = None
+            is_new_point = False
+            if new_estimates.exists(L(lm_gtsam_id)):
+                point = new_estimates.atPoint3(L(lm_gtsam_id))
+                is_new_point = True
+            elif current_isam_values.exists(L(lm_gtsam_id)):
+                point = current_isam_values.atPoint3(L(lm_gtsam_id))
+            
+            # 如果我们找不到位姿或点，就没法计算误差，只能先跳过 (或保守添加)
+            if pose is None or point is None:
+                continue
+
+            # 3. 构造临时因子计算误差
+            # 注意：这里我们还没真的加到 new_graph，只是模拟一下
+            if self.use_depth_weight:
+                depth = self._compute_landmark_depth(point, pose)
+            else:
+                depth = None
+            
+            # 使用严格的噪声模型进行检测 (不加 Hubber，看原始误差)
+            check_noise = gtsam.noiseModel.Isotropic.Sigma(2, 1.0) 
+            temp_factor = gtsam.GenericProjectionFactorCal3_S2(
+                pt_2d, check_noise, X(kf_gtsam_id), L(lm_gtsam_id), 
+                self.K, body_P_sensor=self.body_T_cam
+            )
+            
+            # 构造临时 Values
+            temp_values = gtsam.Values()
+            temp_values.insert(X(kf_gtsam_id), pose)
+            temp_values.insert(L(lm_gtsam_id), point)
+            
+            try:
+                # 计算未经鲁棒核抑制的原始像素误差
+                error = temp_factor.error(temp_values)
+            except:
+                error = float('inf')
+
+            # 4. 判决时刻！
+            # 阈值设定：
+            # Error = 0.5 * (u-u')^2 / sigma^2
+            # 如果 sigma=1, error=50 意味着像素误差 sqrt(100) = 10 像素
+            # error=1618 意味着像素误差极极大
+            
+            REJECTION_THRESHOLD = self.rejection_threshold  # 对应约 10 像素的重投影误差
+            
+            if error > REJECTION_THRESHOLD:
+                # 这是一个坏因子！
+                print(f"🔥 [Firewall] 拦截坏因子! KF{kf_id}-LM{lm_id}, Error: {error:.2f}")
+                bad_landmarks.add(lm_id) # 标记这个点有问题
+                
+                # 如果这是一个老点 (不在 new_estimates 里)，它可能已经腐化了
+                # 我们不仅要拒绝这个因子，甚至应该考虑把这个点拉黑
+            else:
+                # 通过检查，加入待添加列表
+                valid_visual_factors.append((kf_id, lm_id, pt_2d, depth, is_new_point))
+
+        # -------------------------------------------------------------------------
+        # 正式添加通过检查的因子到 new_graph
+        # -------------------------------------------------------------------------
+        
+        for kf_id, lm_id, pt_2d, depth, is_new_point in valid_visual_factors:
+            # 如果这个点已经被标记为坏点（因为在别的帧视角下误差巨大），那么它的所有因子都不要了
+            if lm_id in bad_landmarks:
                 continue
                 
             kf_gtsam_id = self._get_kf_gtsam_id(kf_id)
             lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-
-            old_kf_exists = current_isam_values.exists(X(kf_gtsam_id))
-            new_kf_exists = new_estimates.exists(X(kf_gtsam_id))
-            kf_exists = old_kf_exists or new_kf_exists
             
-            old_lm_exists = current_isam_values.exists(L(lm_gtsam_id))
-            new_lm_exists = new_estimates.exists(L(lm_gtsam_id))
-            lm_exists = old_lm_exists or new_lm_exists
-
-            if kf_exists and lm_exists:
-                if new_lm_exists:
-                    lm_3d_pos = new_estimates.atPoint3(L(lm_gtsam_id))
-                    is_new_landmark = True
-                else:  # old_lm_exists
-                    lm_3d_pos = current_isam_values.atPoint3(L(lm_gtsam_id))
-                    is_new_landmark = False
-
-                # 2. 获取关键帧位姿（独立判断）
-                if new_kf_exists:
-                    kf_pose = new_estimates.atPose3(X(kf_gtsam_id))
-                else:  # old_kf_exists
-                    kf_pose = current_isam_values.atPose3(X(kf_gtsam_id))
-                
-                if self.use_depth_weight:
-                    depth = self._compute_landmark_depth(lm_3d_pos, kf_pose) # 计算深度并应用降权
-                else:
-                    depth = None
-                weighted_noise = self._get_adaptive_noise(depth, is_new_landmark)
-                
-                factor = gtsam.GenericProjectionFactorCal3_S2(
-                    pt_2d, weighted_noise, X(kf_gtsam_id), L(lm_gtsam_id), 
+            # ... (这里放你原本的构建 factor 代码，使用 Huber 核等) ...
+            # weighted_noise = self._get_adaptive_noise(depth, is_new_point)
+            factor = gtsam.GenericProjectionFactorCal3_S2(
+                    pt_2d, self.visual_robust_noise, X(kf_gtsam_id), L(lm_gtsam_id), 
                     self.K, body_P_sensor=self.body_T_cam
                 )
+            new_graph.add(factor)
+            
+            # 更新时间戳逻辑...
+            if not is_new_point: # old_lm_exists
+                 new_window_stamps[L(lm_gtsam_id)] = float(self._get_kf_gtsam_id(new_keyframe.get_id()))
+            elif lm_id not in bad_landmarks:
+                 valid_new_landmarks.add(lm_gtsam_id) # 这是一个有效的新点
 
-                # 构造一个临时的 Values 用来计算误差
-                temp_val = gtsam.Values()
-                temp_val.insert(X(kf_gtsam_id), kf_pose)
-                temp_val.insert(L(lm_gtsam_id), lm_3d_pos)
-                
-                error = factor.error(temp_val)
-                
-                if is_new_landmark:
-                    # 新点：严格把关，防止初始化错误的点把图拉崩
-                    chi2_threshold = 100.0  # 约等于 14-20 像素误差
-                else:
-                    # 老点：极度宽容！
-                    # 这里的逻辑是：老点已经被之前的帧验证过了，值得信任。
-                    # 如果误差大，说明是 KF Pose (IMU预测) 错了，必须把因子加进去拉回 Pose
-                    chi2_threshold = 150.0 # 约等于 50-70 像素误差
-
-                # 阈值判断：如果误差太大（例如 > 100），说明即便膨胀了噪声，这个点还是离谱
-                if error < chi2_threshold: 
-                    new_graph.add(factor)
-
-                    # 更新历史路标点的滑窗记录
-                    if old_lm_exists:
-                        new_window_stamps[L(lm_gtsam_id)] = float(kf_gtsam_id)
-                    elif is_new_landmark:
-                        # 如果是新点，且成功添加了因子，标记为有效
-                        valid_new_landmarks.add(lm_gtsam_id)
-                else:
-                    # 可以在这里打印个日志
-                    # print(f"Rejected factor KF{kf_id}-LM{lm_id} with massive error {error:.2f}")
-                    pass
+        # 清理垃圾：把刚才发现的 bad_landmarks 从 new_estimates 里删掉
+        # 防止把没有因子的孤立点加进去，导致 Indeterminant
+        for lm_id in bad_landmarks:
+            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+            if new_estimates.exists(L(lm_gtsam_id)):
+                print(f"🗑️ [Firewall] 移除有毒的新点变量 L{lm_id}")
+                new_estimates.erase(L(lm_gtsam_id))
+            if L(lm_gtsam_id) in new_window_stamps:
+                del new_window_stamps[L(lm_gtsam_id)]
         
         # 清理无效的新路标点
         # 遍历本次尝试添加的所有新路标点
@@ -483,6 +527,7 @@ class Backend:
             end_time = time.time()
             print(f"【Backend Timer】: Incremental optimization took { (end_time - start_time) * 1000:.3f} ms.")
 
+        # except Exception as e:
         except RuntimeError as e:
             print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
             print("!!!!!!!!!! OPTIMIZATION FAILED !!!!!!!!!!!!!!")
@@ -495,6 +540,10 @@ class Backend:
         latest_gtsam_id = self.next_gtsam_kf_id - 1
         if latest_bias is not None:
             self.latest_bias = latest_bias
+
+        if latest_pose is None:
+             print("【Backend】Critical: Optimization succeeded but state retrieval failed.")
+             return
 
         # 记录优化误差
         new_factors_error = self._log_optimization_error(new_graph)

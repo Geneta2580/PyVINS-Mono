@@ -75,6 +75,11 @@ EuRoC_Dataset_Root/       # e.g., MH_01_easy
 * `MH_03_Medium`
 * `MH_04_Difficult`
 * `MH_05_Difficult`
+* `V1_01_Easy`
+* `V1_02_Medium`
+* `V2_01_Easy`
+* `V2_02_Medium`
+* `V2_03_Difficult`
 
 ### 2. KITTI Dataset
 The project supports synced and unsynced KITTI formats. Ensure your dataset root contains the image and OXTS folders directly.
