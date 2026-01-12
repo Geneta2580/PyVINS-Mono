@@ -20,13 +20,13 @@ class Estimator(threading.Thread):
     """
     The central coordinator for the SLAM system. Runs as a consumer thread.
     """
-    def __init__(self, config, input_queue, viewer_queue, global_central_map):
+    def __init__(self, config, imu_processor, input_queue, viewer_queue, global_central_map):
         super().__init__(daemon=True)
         self.config = config
         self.input_queue = input_queue
         self.local_map = LocalMap(config)
 
-        self.imu_processor = IMUProcessor(config)
+        self.imu_processor = imu_processor
         self.imu_buffer = []
 
         self.backend = Backend(global_central_map, config, self.imu_processor)

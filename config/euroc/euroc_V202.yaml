@@ -27,7 +27,7 @@ min_parallax: 10
 min_stationary_parallax: 0.5
 
 # 最大特征点数
-max_features_to_detect: 150
+max_features_to_detect: 200
 
 # 最小跟踪比例
 min_track_ratio: 0.5

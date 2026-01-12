@@ -6,17 +6,18 @@ import queue
 
 from utils.dataloader import ImuMeasurement
 from core.visual_process import VisualProcessor
-from core.imu_process import IMUProcessor
 from utils.debug import Debugger
 
 class FeatureTracker(threading.Thread):
-    def __init__(self, config, dataloader, output_queue):
+    def __init__(self, config, dataloader, imu_processor, output_queue):
         super().__init__(daemon=True)
         self.config = config
         self.dataloader = dataloader
         self.output_queue = output_queue
 
+        self.imu_processor = imu_processor
         self.imu_buffer = deque()
+        self.last_image_timestamp = None
         self.last_kf_timestamp = None
 
         # Threading control
@@ -59,6 +60,12 @@ class FeatureTracker(threading.Thread):
                         'imu_measurements': data,
                         'timestamp': timestamp,
                     }
+                    # 存储IMU数据到缓冲区，用于光流初值预测
+                    self.imu_buffer.append((timestamp, data))
+                    # 保持缓冲区大小，只保留最近的IMU数据（例如最近1秒的数据）
+                    max_buffer_time = 1.0  # 秒
+                    while len(self.imu_buffer) > 0 and timestamp - self.imu_buffer[0][0] > max_buffer_time:
+                        self.imu_buffer.popleft()
                 try:
                     self.output_queue.put(imu_measurements, timeout=0.1)
                 except queue.Full:
@@ -70,8 +77,30 @@ class FeatureTracker(threading.Thread):
                 image_data = data[0]
                 print(f"【FeatureTracker】Image data: {data[1]}")
                 
+                # 准备IMU数据用于光流初值预测
+                imu_data_for_prediction = None
+                if self.last_image_timestamp is not None and len(self.imu_buffer) > 0:
+                    # 获取从上一帧到当前帧的IMU测量数据
+                    imu_measurements = [
+                        (ts, imu_data) for ts, imu_data in self.imu_buffer
+                        if self.last_image_timestamp < ts <= timestamp
+                    ]
+                    if len(imu_measurements) > 0:
+                        imu_data_for_prediction = {
+                            'measurements': imu_measurements,
+                            'start_time': self.last_image_timestamp,
+                            'end_time': timestamp
+                        }
+                
                 # 光流追踪特征点（返回stats和viz_payload）
-                undistorted_features, feature_ids, stats, viz = self.visual_processor.track_features(image_data, timestamp)
+                undistorted_features, feature_ids, stats, viz = self.visual_processor.track_features(
+                    image_data, timestamp, 
+                    imu_data_for_prediction=imu_data_for_prediction,
+                    imu_processor=self.imu_processor
+                )
+                
+                # 更新上一帧图像时间戳
+                self.last_image_timestamp = timestamp
 
                 # 视觉判定（来自VisualProcessor）
                 is_kf_visual = int(stats["is_kf_visual"])

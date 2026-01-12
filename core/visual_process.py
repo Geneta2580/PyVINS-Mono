@@ -125,7 +125,7 @@ class VisualProcessor:
 
 
     # 光流追踪特征点
-    def track_features(self, image, timestamp):
+    def track_features(self, image, timestamp, predicted_pts=None, imu_data_for_prediction=None, imu_processor=None):
         curr_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         # 一些局部变量的初始化
         is_kf = False
@@ -194,9 +194,24 @@ class VisualProcessor:
             return undistorted_pts, self.prev_pt_ids, stats, viz_payload
 
         # 非第一帧处理逻辑       
+        # 使用IMU预测的初值（如果提供）
+        initial_pts = predicted_pts
+        if initial_pts is None and imu_data_for_prediction is not None and imu_processor is not None:
+            # 使用GTSAM预积分计算旋转并预测光流初值
+            print(f"【VisualProcessor】Using IMU prediction for initial points")
+            initial_pts = self._predict_optical_flow_with_imu(imu_data_for_prediction, imu_processor)
+        
+        # 确保 initial_pts 格式正确（连续数组，形状与 prev_pts 匹配）
+        if initial_pts is not None:
+            # 确保形状匹配 (N, 1, 2)
+            if initial_pts.shape != self.prev_pts.shape:
+                initial_pts = initial_pts.reshape(self.prev_pts.shape)
+            # 确保是连续的 float32 数组
+            initial_pts = np.ascontiguousarray(initial_pts, dtype=np.float32)
+        
         # 正向光流
         curr_pts, forward_status, _ = cv2.calcOpticalFlowPyrLK(
-            self.prev_gray, curr_gray, self.prev_pts, None,
+            self.prev_gray, curr_gray, self.prev_pts, initial_pts,
             winSize=(21, 21), maxLevel=3,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
         )
@@ -454,3 +469,87 @@ class VisualProcessor:
         cv2.waitKey(1)
         
         return vis_img
+    
+    def _predict_optical_flow_with_imu(self, imu_data_for_prediction, imu_processor):
+        """
+        使用GTSAM预积分的旋转部分预测光流初值
+        
+        Args:
+            imu_data_for_prediction: 包含IMU测量数据和时间戳的字典
+                - 'measurements': List of (timestamp, ImuMeasurement) tuples
+                - 'start_time': 起始时间戳
+                - 'end_time': 结束时间戳
+            imu_processor: IMUProcessor实例，用于执行预积分
+            
+        Returns:
+            predicted_pts: 预测的特征点位置 (N, 1, 2) 或 None
+        """
+        if imu_data_for_prediction is None or imu_processor is None:
+            return None
+        
+        # 获取上一帧的特征点
+        if self.prev_pts is None or len(self.prev_pts) == 0:
+            return None
+        
+        measurements = imu_data_for_prediction['measurements']
+        start_time = imu_data_for_prediction['start_time']
+        end_time = imu_data_for_prediction['end_time']
+        
+        if len(measurements) < 1:
+            return None
+        
+        # 使用GTSAM预积分API计算旋转增量
+        try:
+            preintegrated = imu_processor.pre_integration(measurements, start_time, end_time)
+            if preintegrated is None:
+                return None
+            
+            # 从预积分结果中获取旋转增量（deltaRij返回从i到j的旋转）
+            delta_R_imu = preintegrated.deltaRij().matrix()  # 返回numpy数组，形状(3, 3)
+            
+        except Exception as e:
+            print(f"【VisualProcessor】Error in IMU preintegration: {e}")
+            return None
+        
+        # 将特征点从像素坐标转换为归一化坐标
+        # prev_pts shape: (N, 1, 2)
+        prev_pts_reshaped = self.prev_pts.reshape(-1, 2)  # (N, 2)
+        
+        # 去畸变（如果需要）
+        # 这里P=None，返回归一化平面坐标
+        if self.use_undistort:
+            prev_pts_normalized = cv2.undistortPoints(
+                self.prev_pts, self.cam_matrix, self.dist_coeffs,
+                P=None
+            ).reshape(-1, 2)
+        else:
+            # 直接归一化
+            prev_pts_homogeneous = np.hstack([prev_pts_reshaped, np.ones((len(prev_pts_reshaped), 1))])
+            prev_pts_normalized = (np.linalg.inv(self.cam_matrix) @ prev_pts_homogeneous.T).T[:, :2]
+        
+        # 转换为齐次坐标 (N, 3)
+        prev_pts_homogeneous = np.hstack([prev_pts_normalized, np.ones((len(prev_pts_normalized), 1))])
+        
+        # 从IMU坐标系旋转转换为相机坐标系旋转
+        # 获取T_bc外参
+        T_bc_raw = self.config.get('T_bc', np.eye(4).flatten().tolist())
+        T_bc = np.asarray(T_bc_raw).reshape(4, 4)
+        R_bc = T_bc[:3, :3]
+        
+        # 从IMU坐标系旋转转换为相机坐标系旋转
+        # R_cam_curr_cam_prev = R_bc @ R_imu_curr_imu_prev @ R_bc^T
+        R_cam_curr_cam_prev = R_bc.T @ delta_R_imu @ R_bc
+        
+        # 应用旋转（在归一化坐标系中）
+        curr_pts_normalized = (R_cam_curr_cam_prev @ prev_pts_homogeneous.T).T[:, :2]
+        
+        # 转换回像素坐标
+        curr_pts_homogeneous = np.hstack([curr_pts_normalized, np.ones((len(curr_pts_normalized), 1))])
+        curr_pts_pixel = (self.cam_matrix @ curr_pts_homogeneous.T).T[:, :2]
+        
+        # 转换回 (N, 1, 2) 格式，确保是连续的数组
+        predicted_pts = np.ascontiguousarray(
+            curr_pts_pixel.reshape(-1, 1, 2).astype(np.float32)
+        )
+        
+        return predicted_pts

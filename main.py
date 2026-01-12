@@ -10,6 +10,7 @@ import cv2
 
 from utils.dataloader import UnifiedDataloader
 from datatype.global_map import GlobalMap
+from core.imu_process import IMUProcessor
 from core.estimator import Estimator
 from core.feature_tracker import FeatureTracker
 from core.viewer import Viewer3D
@@ -38,8 +39,9 @@ def main():
     # 启动一个spawn主进程
     mp.set_start_method('spawn', force=True)
 
-    # 创建全局地图
+    # 创建全局地图/全局积分器
     global_central_map = GlobalMap()
+    imu_processor = IMUProcessor(config)
 
     # 创建队列
     feature_tracker_to_estimator_queue = queue.Queue(maxsize=20)
@@ -50,8 +52,8 @@ def main():
     data_loader = UnifiedDataloader(dataloader_config)
 
     # 实例化所有模块
-    feature_tracker = FeatureTracker(config, data_loader, feature_tracker_to_estimator_queue)
-    estimator = Estimator(config, feature_tracker_to_estimator_queue, estimator_to_viewer_queue, global_central_map)
+    feature_tracker = FeatureTracker(config, data_loader, imu_processor, feature_tracker_to_estimator_queue)
+    estimator = Estimator(config, imu_processor, feature_tracker_to_estimator_queue, estimator_to_viewer_queue, global_central_map)
     viewer = Viewer3D(estimator_to_viewer_queue) if config.get('enable_viewer', True) else None
     
     # 3. 启动所有线程

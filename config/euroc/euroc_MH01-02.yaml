@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_03_medium"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_01_easy"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -84,7 +84,7 @@ optimization_max_delete_reprojection_error: 1000.0 # 优化新地图点最大删
 init_window_size: 10
 
 # 边缘化窗口大小
-lag_window_size: 9 # 10-1
+lag_window_size: 29 # 10-1
 
 # 初始化外参
 T_bc: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
