@@ -16,11 +16,16 @@ class Backend:
         self.config = config
 
         # 使用 iSAM2 作为优化器
-        self.lag_window_size = config.get('lag_window_size', 9) # 优化器的滑窗
-        parameters = gtsam.ISAM2Params()
-        parameters.setRelinearizeThreshold(0.01) 
-        parameters.relinearizeSkip = 1
-        self.smoother = IncrementalFixedLagSmoother(self.lag_window_size, parameters) # 自动边缘化
+        # self.lag_window_size = config.get('lag_window_size', 9) # 优化器的滑窗
+        # parameters = gtsam.ISAM2Params()
+        # parameters.setRelinearizeThreshold(0.01) 
+        # parameters.relinearizeSkip = 1
+        # self.smoother = IncrementalFixedLagSmoother(self.lag_window_size, parameters) # 自动边缘化
+
+        # 滑窗数据结构
+        self.active_values = gtsam.Values()
+        self.gtsam_kf_gtsam_ids = []
+        self.marg_factor = None
         
         # 鲁棒因子
         self.visual_noise_sigma = config.get('visual_noise_sigma', 2.0)
@@ -141,56 +146,6 @@ class Backend:
 
         print(f"【Backend】: 成功标记 {len(unhealty_lm_ids)} 个路标点为待清理状态")
         print(f"【Backend】: Fixed-Lag Smoother 将在滑窗移动时自动清理这些landmark")
-
-        # # 删除因子逻辑
-        # print(f"【Backend】: 接收到移除 {len(unhealty_lm_ids)} 个陈旧路标点的指令。")
-        # if not unhealty_lm_ids:
-        #     return
-
-        # graph = self.smoother.getFactors()
-        # factor_indices_to_remove = []
-        # unhealty_lm_keys = {L(self._get_lm_gtsam_id(lm_id)) for lm_id in unhealty_lm_ids}
-        # unhealty_lm_keys_depth = {L(self._get_lm_gtsam_id(lm_id)) for lm_id in unhealty_lm_ids_depth}
-        # unhealty_lm_keys_reproj = {L(self._get_lm_gtsam_id(lm_id)) for lm_id in unhealty_lm_ids_reproj}
-
-        # oldest_gtsam_key = None
-        # if oldest_kf_id_in_window is not None and oldest_kf_id_in_window in self.kf_id_to_gtsam_id:
-        #     oldest_gtsam_key = X(self._get_kf_gtsam_id(oldest_kf_id_in_window))
-        #     print(f"【Backend】: 最旧的关键帧的gtsam_id: {oldest_gtsam_key}")
-
-        # # 收集需要删除的因子
-        # for i in range(graph.size()):
-        #     factor = graph.at(i)
-        #     if factor is not None:
-        #         factor_type = factor.__class__.__name__
-                
-        #         # 只删除投影因子，绝不删除边缘化因子、IMU因子等
-        #         if factor_type != 'GenericProjectionFactorCal3_S2':
-        #             continue
-                
-        #         for key in factor.keys():
-        #             if key in unhealty_lm_keys_depth or key in unhealty_lm_keys_reproj:
-        #                 key_str = ", ".join([gtsam.DefaultKeyFormatter(k) for k in factor.keys()])
-        #                 print(f"  [标记删除] Index: {i}, 类型: {factor_type}, 连接: [{key_str}]")
-        #                 factor_indices_to_remove.append(i)
-        #                 break
-
-        # # 关键修改：只删除因子，不要尝试操作变量的时间戳
-        # if factor_indices_to_remove:
-        #     empty_graph = gtsam.NonlinearFactorGraph()
-        #     empty_values = gtsam.Values()
-        #     # empty_stamps = FixedLagSmootherKeyTimestampMap()
-        #     empty_stamps = {}
-            
-        #     self.smoother.update(empty_graph, empty_values, empty_stamps, factor_indices_to_remove)
-        #     print(f"【Backend】: 成功移除 {len(factor_indices_to_remove)} 个深度为负的路标点的因子")
-
-        # # 删除ID映射 - 修正：只删除那些实际删除了因子的landmark
-        # for lm_id in unhealty_lm_ids:  # 改为 unhealty_lm_ids_depth
-        #     if lm_id in self.landmark_id_to_gtsam_id:
-        #         del self.landmark_id_to_gtsam_id[lm_id]
-
-        # print(f"【Backend】: 成功移除 {len(unhealty_lm_ids)} 个路标点的因子")
         
 
     def initialize_optimize(self, initial_keyframes, initial_imu_factors, initial_landmarks, initial_velocities, initial_bias):
