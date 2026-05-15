@@ -1,14 +1,10 @@
-from hmac import new
-import queue
+import time
 import numpy as np
 import gtsam
 from gtsam.symbol_shorthand import X, V, B, L
-# from gtsam_unstable import IncrementalFixedLagSmoother, FixedLagSmootherKeyTimestampMap
-from gtsam import IncrementalFixedLagSmoother
 
-import re
 from utils.debug import Debugger
-import time
+from datatype.landmark import LandmarkStatus
 
 class Backend:
     def __init__(self, global_central_map, config, imu_processor):
@@ -16,17 +12,20 @@ class Backend:
         self.config = config
 
         # 使用 iSAM2 作为优化器
-        # self.lag_window_size = config.get('lag_window_size', 9) # 优化器的滑窗
         # parameters = gtsam.ISAM2Params()
         # parameters.setRelinearizeThreshold(0.01) 
         # parameters.relinearizeSkip = 1
         # self.smoother = IncrementalFixedLagSmoother(self.lag_window_size, parameters) # 自动边缘化
 
         # 滑窗数据结构
+        self.lag_window_size = config.get('lag_window_size', 9) # 优化器的滑窗
         self.active_values = gtsam.Values()
-        self.gtsam_kf_gtsam_ids = []
+        self.active_kf_gtsam_ids = []
         self.marg_factor = None
-        
+
+        # 初始化先验因子缓存
+        self.init_priors = gtsam.NonlinearFactorGraph()
+
         # 鲁棒因子
         self.visual_noise_sigma = config.get('visual_noise_sigma', 2.0)
         self.visual_noise = gtsam.noiseModel.Isotropic.Sigma(2, self.visual_noise_sigma)
@@ -73,6 +72,9 @@ class Backend:
         # 初始化Debugger
         self.logger = Debugger(self.config, file_prefix="backend_state", column_names=log_columns)
 
+        # 🔥 新增：用于彻底拦截已经被化为先验的路标点，防止前端诈尸
+        self.marginalized_landmarks = set()
+
     # 关键帧id映射到图的id
     def _get_kf_gtsam_id(self, kf_id):
         if kf_id not in self.kf_id_to_gtsam_id:
@@ -87,26 +89,23 @@ class Backend:
         return self.landmark_id_to_gtsam_id[lm_id]
 
     def get_latest_optimized_state(self):
-        if self.next_gtsam_kf_id == 0:
+        if not self.active_kf_gtsam_ids:
             return None, None, None
         
-        latest_gtsam_id = self.next_gtsam_kf_id - 1
-
-        result = self.smoother.calculateEstimate()
+        latest_gtsam_id = self.active_kf_gtsam_ids[-1]
 
         try:
-            pose = result.atPose3(X(latest_gtsam_id))
-            velocity = result.atVector(V(latest_gtsam_id))
-            bias = result.atConstantBias(B(latest_gtsam_id))
-            # print(f"【Backend】: Latest optimized state: pose: {pose.matrix()}, velocity: {velocity}, bias: {bias}")
+            pose = self.active_values.atPose3(X(latest_gtsam_id))
+            velocity = self.active_values.atVector(V(latest_gtsam_id))
+            bias = self.active_values.atConstantBias(B(latest_gtsam_id))
             return pose, velocity, bias
         except Exception as e:
-            print(f"[Error][Backend] Failed to retrieve latest state for gtsam_id {latest_gtsam_id}: {e}")
+            print(f"[Error][Backend] Failed to retrieve latest state: {e}")
             return None, None, None
 
     def update_estimator_map(self, keyframe_window, landmarks):
         print("【Backend】: Syncing optimized results back to Estimator...")
-        optimized_results = self.smoother.calculateEstimate()
+        optimized_results = self.active_values
 
         # 更新关键帧位姿
         for kf in keyframe_window:
@@ -152,72 +151,93 @@ class Backend:
         print("【Backend】: Initializing optimize...")
 
         graph = gtsam.NonlinearFactorGraph()
-        estimates = gtsam.Values()
-        
-        # initial_window_stamps = FixedLagSmootherKeyTimestampMap()
-        initial_window_stamps = {}
 
+        # 确保初始化时状态机是干净的
+        self.active_values.clear()
+        self.active_kf_gtsam_ids.clear()
+        self.marg_factor = None  # 刚初始化时显然没有先验残余
+        
+        # ---------------------------------------------------------
+        # 1. 插入初始帧状态 (Pose, Vel, Bias) 并添加强先验
+        # ---------------------------------------------------------
         for i, kf in enumerate(initial_keyframes):
             kf_gtsam_id = self._get_kf_gtsam_id(kf.get_id())
+            self.active_kf_gtsam_ids.append(kf_gtsam_id)
 
             # 从初始化结果中获取位姿、速度和偏置
             T_wb = gtsam.Pose3(kf.get_global_pose())
-            # initial_velocities 是一个扁平化的数组，每3个元素是一个速度向量
-            velocity = initial_velocities[i*3 : i*3+3]
-            
-            # 所有帧使用相同的初始偏置
-            bias = initial_bias
+            velocity = initial_velocities[i*3 : i*3+3] # initial_velocities是一个扁平化的数组，每3个元素是一个速度向量
+            bias = initial_bias # 所有帧使用相同的初始偏置
 
             # 添加初始估计值
-            estimates.insert(X(kf_gtsam_id), T_wb)
-            estimates.insert(V(kf_gtsam_id), velocity)
-            estimates.insert(B(kf_gtsam_id), bias)
-
-            # 添加滑窗记录
-            initial_window_stamps[X(kf_gtsam_id)] = float(kf_gtsam_id)
-            initial_window_stamps[V(kf_gtsam_id)] = float(kf_gtsam_id)
-            initial_window_stamps[B(kf_gtsam_id)] = float(kf_gtsam_id)
+            self.active_values.insert(X(kf_gtsam_id), T_wb)
+            self.active_values.insert(V(kf_gtsam_id), velocity)
+            self.active_values.insert(B(kf_gtsam_id), bias)
 
             # 为第一帧添加强先验
             if kf_gtsam_id == 0:
                 prior_pose_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-4]*3 + [1e-2]*3))
                 prior_vel_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([2e-2] * 3))
                 prior_bias_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1]*3 + [1e-2]*3))
-                graph.add(gtsam.PriorFactorPose3(X(0), T_wb, prior_pose_noise))
-                graph.add(gtsam.PriorFactorVector(V(0), velocity, prior_vel_noise))
-                graph.add(gtsam.PriorFactorConstantBias(B(0), bias, prior_bias_noise))
-        
-        # 为每一个landmark设置滑窗记录
-        last_gtsam_id = self._get_kf_gtsam_id(initial_keyframes[-1].get_id())
-        for lm_id in initial_landmarks.keys():
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-            initial_window_stamps[L(lm_gtsam_id)] = float(last_gtsam_id) # 设为最后一帧的ID
 
-        # 添加所有初始IMU因子
+                f_pose = gtsam.PriorFactorPose3(X(0), T_wb, prior_pose_noise)
+                f_vel = gtsam.PriorFactorVector(V(0), velocity, prior_vel_noise)
+                f_bias = gtsam.PriorFactorConstantBias(B(0), bias, prior_bias_noise)
+
+                graph.add(f_pose)
+                graph.add(f_vel)
+                graph.add(f_bias)
+
+                # 存进缓存备用
+                self.init_priors.add(f_pose)
+                self.init_priors.add(f_vel)
+                self.init_priors.add(f_bias)
+        
+        # ---------------------------------------------------------
+        # 2. 插入初始路标点状态 (3D Position)
+        # ---------------------------------------------------------
+        for lm_id, lm_3d_pos in initial_landmarks.items():
+            # 致命防御：防 NaN/Inf
+            if np.isnan(lm_3d_pos).any() or np.isinf(lm_3d_pos).any():
+                print(f"【Backend Warning】: Landmark {lm_id} has NaN/Inf position. Skipped.")
+                continue
+                
+            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+            self.active_values.insert(L(lm_gtsam_id), lm_3d_pos)
+
+        # ---------------------------------------------------------
+        # 3. 压入所有 IMU 预积分因子
+        # ---------------------------------------------------------
         for factor_data in initial_imu_factors:
             start_kf = next(kf for kf in initial_keyframes if kf.get_timestamp() == factor_data['start_kf_timestamp'])
             end_kf = next(kf for kf in initial_keyframes if kf.get_timestamp() == factor_data['end_kf_timestamp'])
+            
             gtsam_id1 = self._get_kf_gtsam_id(start_kf.get_id())
             gtsam_id2 = self._get_kf_gtsam_id(end_kf.get_id())
             pim = factor_data['imu_preintegration']
-            graph.add(gtsam.CombinedImuFactor(X(gtsam_id1), V(gtsam_id1), X(gtsam_id2), V(gtsam_id2), B(gtsam_id1), B(gtsam_id2), pim))
+            
+            graph.add(gtsam.CombinedImuFactor(
+                X(gtsam_id1), V(gtsam_id1), X(gtsam_id2), V(gtsam_id2), B(gtsam_id1), B(gtsam_id2), pim))
 
-        # 添加所有初始路标点变量和视觉因子
-        for lm_id, lm_3d_pos in initial_landmarks.items():
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-            estimates.insert(L(lm_gtsam_id), lm_3d_pos)
-
+        # ---------------------------------------------------------
+        # 4. 压入所有视觉重投影因子
+        # ---------------------------------------------------------
         for kf in initial_keyframes:
             kf_gtsam_id = self._get_kf_gtsam_id(kf.get_id())
+            T_wb = gtsam.Pose3(kf.get_global_pose()) # 提取该帧位姿用于深度计算
+            
             for lm_id, pt_2d in zip(kf.get_visual_feature_ids(), kf.get_visual_features()):
-                # 只处理本次优化中新添加的landmark
                 if lm_id in initial_landmarks:
                     lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-                    # 计算深度并应用降权
-                    T_wb = gtsam.Pose3(kf.get_global_pose()) # 获取关键帧位姿用于深度计算
+
+                    # 确保这个点在 active_values 中存在（可能因 NaN 被跳过）
+                    if not self.active_values.exists(L(lm_gtsam_id)):
+                        continue
+
                     current_lm_pos = initial_landmarks[lm_id]
+
+                    # 计算深度并应用降权
                     depth = self._compute_landmark_depth(current_lm_pos, T_wb)
-                    # 这里将初始化的点标记为False
                     weighted_noise = self._get_adaptive_noise(depth, False)
 
                     factor = gtsam.GenericProjectionFactorCal3_S2(
@@ -226,26 +246,34 @@ class Backend:
                     )
                     graph.add(factor)
 
-        # 执行iSAM2的第一次更新（批量模式）
-        print(f"【Backend】: Initializing iSAM2 with {graph.size()} new factors and {estimates.size()} new values...")
+        # ---------------------------------------------------------
+        # 5. 执行全局 LM 批量优化
+        # ---------------------------------------------------------
+        print(f"【Backend】: Initializing graph with {graph.size()} factors and {self.active_values.size()} variables...")        
         
         try:
             start_time = time.time()
-            self.smoother.update(graph, estimates, initial_window_stamps)
+            params = gtsam.LevenbergMarquardtParams()
+            optimizer = gtsam.LevenbergMarquardtOptimizer(graph, self.active_values, params)
+            self.active_values = optimizer.optimize()
             end_time = time.time()
             print(f"【Backend Timer】: Initial optimization took { (end_time - start_time) * 1000:.3f} ms.")
         except RuntimeError as e:
             print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
             print("!!!!!!!!!! INITIALIZATION FAILED !!!!!!!!!!!!!!")
             print(f"ERROR: {e}")
-            return # 失败时必须返回
+            return
 
-        # 更新最新bias
+
+        # ---------------------------------------------------------
+        # 6. 更新并打印最新状态
+        # ---------------------------------------------------------
         latest_pose, latest_vel, latest_bias = self.get_latest_optimized_state()
+        latest_gtsam_id = self.next_gtsam_kf_id - 1
+
+        print(f"【Backend】: Latest gtsam_id: {latest_gtsam_id}")
         print(f"【Backend】: Latest optimized state: pose: {latest_pose.matrix()}, velocity: {latest_vel}, bias: {latest_bias}")
 
-        latest_gtsam_id = self.next_gtsam_kf_id - 1
-        print(f"【Backend】: Latest gtsam_id: {latest_gtsam_id}")
         if latest_bias is not None:
             self.latest_bias = latest_bias
         print("【Backend】: Initial graph optimization complete.")
@@ -254,211 +282,154 @@ class Backend:
         new_factors_error = self._log_optimization_error(graph)
         self._log_state_and_errors(latest_gtsam_id, latest_pose, latest_vel, latest_bias, new_factors_error)
 
+        # ---------------------------------------------------------
+        # 7. 后处理：极端情况的初始边缘化 (防超窗)
+        # ---------------------------------------------------------
+        # 通常 init_window_size <= lag_window_size，但也可能触发超窗
+        # while len(self.active_kf_gtsam_ids) > self.lag_window_size:
+        oldest_gtsam_id = self.active_kf_gtsam_ids.pop(0)
+        keys_to_marg_list = [X(oldest_gtsam_id), V(oldest_gtsam_id), B(oldest_gtsam_id)]
+        keys_to_marg = gtsam.KeyVector()
+        for k in keys_to_marg_list: keys_to_marg.append(k)
 
-    def optimize_incremental(self, last_keyframe, new_keyframe, new_imu_factors, 
-                            new_landmarks, new_visual_factors, initial_state_guess, is_stationary, oldest_kf_id_in_window):
-        new_graph = gtsam.NonlinearFactorGraph()
-        new_estimates = gtsam.Values()
-        current_isam_values = self.smoother.calculateEstimate()
-        new_window_stamps = {}
+        try:
+            self.marg_factor = gtsam.marginalizeOut(graph, self.active_values, keys_to_marg)
+        except Exception as e:
+            print(f"【Backend Init Error】: Marginalization failed: {e}")
+            
+        for k in keys_to_marg_list:
+            if self.active_values.exists(k):
+                self.active_values.erase(k)
 
-        # 添加新关键帧的状态变量，使用IMU预测值作为初始估计
+    def window_optimize(self, active_kfs, window_imu_factors, window_landmarks,
+                             window_visual_factors, new_kf_initial_guess, is_stationary):
+        # 获取最新关键帧对象，使用IMU预测值作为初始估计
+        old_keyframe = active_kfs[0]
+        new_keyframe = active_kfs[-1]
         kf_gtsam_id = self._get_kf_gtsam_id(new_keyframe.get_id())
-        T_wb_guess, vel_guess, bias_guess = initial_state_guess
+        T_wb_guess, vel_guess, bias_guess = new_kf_initial_guess
 
-        # 检查关键帧是否已经在图中存在，避免重复添加（防御性检查）
-        if not current_isam_values.exists(X(kf_gtsam_id)) or not current_isam_values.exists(V(kf_gtsam_id)) or not current_isam_values.exists(B(kf_gtsam_id)):
-            new_estimates.insert(X(kf_gtsam_id), T_wb_guess)
-            new_estimates.insert(V(kf_gtsam_id), vel_guess)
-            new_estimates.insert(B(kf_gtsam_id), bias_guess)
+        # ！！！绝对防火墙：过滤掉历史已边缘化的点，阻止它们重返状态机 ！！！
+        window_landmarks = {k: v for k, v in window_landmarks.items() if k not in self.marginalized_landmarks}
+        window_visual_factors = [f for f in window_visual_factors if f[1] not in self.marginalized_landmarks]
 
-            # 添加滑窗记录
-            new_window_stamps[X(kf_gtsam_id)] = float(kf_gtsam_id)
-            new_window_stamps[V(kf_gtsam_id)] = float(kf_gtsam_id)
-            new_window_stamps[B(kf_gtsam_id)] = float(kf_gtsam_id)
-        else:
-            print(f"【Backend】: Warning: Keyframe {new_keyframe.get_id()} (gtsam_id={kf_gtsam_id}) already exists in graph. Skipping variable insertion.")
-            # 如果关键帧已存在，仍然需要更新滑窗时间戳（如果Fixed-Lag Smoother需要）
-            # 注意：这里不添加变量，只更新时间戳（如果需要的话）
+        # ---------------------------------------------------------
+        # 1. 向 Active Values 中插入新状态 (仅仅是新帧和新点)
+        # ---------------------------------------------------------
+        if not self.active_values.exists(X(kf_gtsam_id)):
+            self.active_values.insert(X(kf_gtsam_id), T_wb_guess)
+            self.active_values.insert(V(kf_gtsam_id), vel_guess)
+            self.active_values.insert(B(kf_gtsam_id), bias_guess)
+            self.active_kf_gtsam_ids.append(kf_gtsam_id)
 
-        # if not is_stationary:
-        # 添加IMU因子
-        last_kf_gtsam_id = self._get_kf_gtsam_id(last_keyframe.get_id())
-        pim = new_imu_factors['imu_preintegration']
-        imu_factor = gtsam.CombinedImuFactor(
-            X(last_kf_gtsam_id), V(last_kf_gtsam_id), X(kf_gtsam_id), V(kf_gtsam_id),
-            B(last_kf_gtsam_id), B(kf_gtsam_id), pim)
-        new_graph.add(imu_factor)
-
-        # 添加新路标点顶点，注意这里添加的顶点只在new_estimates中还没有进入isam2的图
-        # if not is_stationary:
-        added_new_landmark_gtsam_ids = set()
-
-        for lm_id, lm_3d_pos in new_landmarks.items():            
-            # 增加一个NaN/Inf的显式检查，这对于调试崩溃至关重要
+        for lm_id, lm_3d_pos in window_landmarks.items():
+            # 安全检查：拒绝 NaN/Inf
             if np.isnan(lm_3d_pos).any() or np.isinf(lm_3d_pos).any():
                 print(f"🔥 【Backend】[致命警告]: 路标点 L{lm_id} 的初始值无效 (NaN/Inf)！优化即将因此崩溃！")
-                continue  # 直接跳过无效的landmark
-
+                continue
             lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-            # ---!!!--- 在此处添加您要的日志 ---!!!---
-            # 打印即将送入优化器的路标点的值
-            # print(f"🕵️‍ 【Backend】: 优化器即将处理新路标点 L{lm_id}，其三角化初始值为: {lm_3d_pos}")
+            if not self.active_values.exists(L(lm_gtsam_id)):
+                self.active_values.insert(L(lm_gtsam_id), lm_3d_pos)
 
-            # 检查：1) 不在旧图中，2) 还没被添加过 确保顶点只被添加一次
-            if not current_isam_values.exists(L(lm_gtsam_id)):
-                new_estimates.insert(L(lm_gtsam_id), lm_3d_pos)
-                # 添加新路标点的滑窗记录
-                new_window_stamps[L(lm_gtsam_id)] = float(kf_gtsam_id)
-                added_new_landmark_gtsam_ids.add(lm_gtsam_id)
-        
-        # 如果一个新路标点在 estimates 里，但所有因子都被 chi2 拒绝，必须将其从 estimates 移除
-        # 否则会导致 iSAM2 遇到无约束变量而奇异/崩溃
-        valid_new_landmarks = set()
+        # ---------------------------------------------------------
+        # 2. 从零构建当前的局部 FactorGraph
+        # ---------------------------------------------------------
+        current_graph = gtsam.NonlinearFactorGraph()
 
-        # -------------------------------------------------------------------------
-        # 【新增逻辑】: 因子防火墙 (Factor Firewall)
-        # -------------------------------------------------------------------------
-        
+        # [A] 加入上一次的边缘化因子（DM-VIO逻辑）
+        if self.marg_factor is not None:
+            current_graph.push_back(self.marg_factor)
+
+        # [A.1] 如果是最开始的几帧（0帧还在窗口内），必须加上绝对先验防漂移
+        if X(0) in [X(id) for id in self.active_kf_gtsam_ids]:
+            current_graph.push_back(self.init_priors)
+
+        # [B] 压入所有 IMU 预积分因子
+        for imu_data in window_imu_factors:
+            id1 = self._get_kf_gtsam_id(imu_data['kf_id1'])
+            id2 = self._get_kf_gtsam_id(imu_data['kf_id2'])
+            pim = imu_data['pim']
+            imu_factor = gtsam.CombinedImuFactor(
+                X(id1), V(id1), X(id2), V(id2), B(id1), B(id2), pim)
+            current_graph.push_back(imu_factor)
+
+        # [C] 压入视觉因子（带防火墙机制）
+        bad_landmarks = set()
         valid_visual_factors = []
-        bad_landmarks = set() # 记录坏点
 
-        for kf_id, lm_id, pt_2d in new_visual_factors:
-            # 1. 基础检查
-            if lm_id not in self.landmark_id_to_gtsam_id:
-                continue
-            
-            kf_gtsam_id = self._get_kf_gtsam_id(kf_id)
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+        # -- 防火墙预检 --
+        for kf_id, lm_id, pt_2d in window_visual_factors:
+            k_id = self._get_kf_gtsam_id(kf_id)
+            l_id = self._get_lm_gtsam_id(lm_id)
 
-            # 2. 准备计算误差所需的临时变量
-            # 我们需要获取 kf 的位姿 和 lm 的位置
-            # 情况A: 变量在 new_estimates 中 (本帧新加的)
-            # 情况B: 变量在 current_isam_values 中 (老变量)
-            
-            pose = None
-            if new_estimates.exists(X(kf_gtsam_id)):
-                pose = new_estimates.atPose3(X(kf_gtsam_id))
-            elif current_isam_values.exists(X(kf_gtsam_id)):
-                pose = current_isam_values.atPose3(X(kf_gtsam_id))
-            
-            point = None
-            is_new_point = False
-            if new_estimates.exists(L(lm_gtsam_id)):
-                point = new_estimates.atPoint3(L(lm_gtsam_id))
-                is_new_point = True
-            elif current_isam_values.exists(L(lm_gtsam_id)):
-                point = current_isam_values.atPoint3(L(lm_gtsam_id))
-            
-            # 如果我们找不到位姿或点，就没法计算误差，只能先跳过 (或保守添加)
-            if pose is None or point is None:
+            if not self.active_values.exists(X(k_id)) or not self.active_values.exists(L(l_id)):
                 continue
 
-            # 3. 构造临时因子计算误差
-            # 注意：这里我们还没真的加到 new_graph，只是模拟一下
-            if self.use_depth_weight:
-                depth = self._compute_landmark_depth(point, pose)
-            else:
-                depth = None
+            pose = self.active_values.atPose3(X(k_id))
+            point = self.active_values.atPoint3(L(l_id))
             
-            # 使用严格的噪声模型进行检测 (不加 Hubber，看原始误差)
+            # 使用严格的基础噪声进行重投影误差检测
             check_noise = gtsam.noiseModel.Isotropic.Sigma(2, 1.0) 
             temp_factor = gtsam.GenericProjectionFactorCal3_S2(
-                pt_2d, check_noise, X(kf_gtsam_id), L(lm_gtsam_id), 
-                self.K, body_P_sensor=self.body_T_cam
+                pt_2d, check_noise, X(k_id), L(l_id), self.K, body_P_sensor=self.body_T_cam
             )
             
-            # 构造临时 Values
             temp_values = gtsam.Values()
-            temp_values.insert(X(kf_gtsam_id), pose)
-            temp_values.insert(L(lm_gtsam_id), point)
+            temp_values.insert(X(k_id), pose)
+            temp_values.insert(L(l_id), point)
             
             try:
-                # 计算未经鲁棒核抑制的原始像素误差
                 error = temp_factor.error(temp_values)
             except:
                 error = float('inf')
 
-            # 4. 判决时刻！
+            # 超过拒绝阈值，标记为坏点
             # 阈值设定：
             # Error = 0.5 * (u-u')^2 / sigma^2
             # 如果 sigma=1, error=50 意味着像素误差 sqrt(100) = 10 像素
-            # error=1618 意味着像素误差极极大
-            
-            REJECTION_THRESHOLD = self.rejection_threshold  # 对应约 10 像素的重投影误差
-            
-            if error > REJECTION_THRESHOLD:
-                # 这是一个坏因子！
+            if error > self.rejection_threshold:
                 print(f"🔥 [Firewall] 拦截坏因子! KF{kf_id}-LM{lm_id}, Error: {error:.2f}")
-                bad_landmarks.add(lm_id) # 标记这个点有问题
-                
-                # 如果这是一个老点 (不在 new_estimates 里)，它可能已经腐化了
-                # 我们不仅要拒绝这个因子，甚至应该考虑把这个点拉黑
+                bad_landmarks.add(lm_id)
             else:
-                # 通过检查，加入待添加列表
-                valid_visual_factors.append((kf_id, lm_id, pt_2d, depth, is_new_point))
+                depth = self._compute_landmark_depth(point, pose) if self.use_depth_weight else None
+                valid_visual_factors.append((k_id, l_id, pt_2d, depth))
 
-        # -------------------------------------------------------------------------
-        # 正式添加通过检查的因子到 new_graph
-        # -------------------------------------------------------------------------
-        
-        for kf_id, lm_id, pt_2d, depth, is_new_point in valid_visual_factors:
-            # 如果这个点已经被标记为坏点（因为在别的帧视角下误差巨大），那么它的所有因子都不要了
-            if lm_id in bad_landmarks:
+        # -- 正式压入健康的视觉因子 --
+        for k_id, l_id, pt_2d, depth in valid_visual_factors:
+            # 原始 lm_id 需要反向查找（如果你存了的话），这里简写为不在黑名单即可
+            # 只要这个点在任意一帧中被防火墙拉黑，我们就彻底放弃它的所有观测
+            original_lm_id = [k for k, v in self.landmark_id_to_gtsam_id.items() if v == l_id][0]
+            if original_lm_id in bad_landmarks:
                 continue
-                
-            kf_gtsam_id = self._get_kf_gtsam_id(kf_id)
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-            
-            # ... (这里放你原本的构建 factor 代码，使用 Huber 核等) ...
-            # weighted_noise = self._get_adaptive_noise(depth, is_new_point)
+
+            # 使用自适应 Huber 核
+            # is_new = False # 根据业务逻辑判断是否刚三角化，简单起见可默认为 False 或从外部传入
+            # weighted_noise = self._get_adaptive_noise(depth, is_new)
             factor = gtsam.GenericProjectionFactorCal3_S2(
-                    pt_2d, self.visual_robust_noise, X(kf_gtsam_id), L(lm_gtsam_id), 
-                    self.K, body_P_sensor=self.body_T_cam
-                )
-            new_graph.add(factor)
-            
-            # 更新时间戳逻辑...
-            if not is_new_point: # old_lm_exists
-                 new_window_stamps[L(lm_gtsam_id)] = float(self._get_kf_gtsam_id(new_keyframe.get_id()))
-            elif lm_id not in bad_landmarks:
-                 valid_new_landmarks.add(lm_gtsam_id) # 这是一个有效的新点
+                pt_2d, self.visual_robust_noise, X(k_id), L(l_id), self.K, body_P_sensor=self.body_T_cam
+            )
+            current_graph.push_back(factor)
 
-        # 清理垃圾：把刚才发现的 bad_landmarks 从 new_estimates 里删掉
-        # 防止把没有因子的孤立点加进去，导致 Indeterminant
-        for lm_id in bad_landmarks:
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
-            if new_estimates.exists(L(lm_gtsam_id)):
-                print(f"🗑️ [Firewall] 移除有毒的新点变量 L{lm_id}")
-                new_estimates.erase(L(lm_gtsam_id))
-            if L(lm_gtsam_id) in new_window_stamps:
-                del new_window_stamps[L(lm_gtsam_id)]
-        
-        # 清理无效的新路标点
-        # 遍历本次尝试添加的所有新路标点
-        for lm_id in list(new_landmarks.keys()): 
-            if lm_id not in self.landmark_id_to_gtsam_id: continue
-            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+        # 清除状态中那些被彻底拉黑的孤立 Landmark
+        # 但必须保留 marg_factor 引用的点，否则优化器找不到对应的 key
+        # 打印发现marg_factor会保留这个拉黑的点index
+        marg_keys = set()
+        if self.marg_factor is not None:
+            marg_keys = set(self.marg_factor.keys())
 
-            # 如果它在 estimates 里（说明通过了 NaN 检查），但不在 valid 集合里（说明没因子）
-            if new_estimates.exists(L(lm_gtsam_id)) and lm_gtsam_id not in valid_new_landmarks:
-                # print(f"【Backend】: Cleaning up unconstrained new landmark L{lm_id} (All factors rejected)")
-                new_estimates.erase(L(lm_gtsam_id))
-                if L(lm_gtsam_id) in new_window_stamps:
-                    del new_window_stamps[L(lm_gtsam_id)]
+        for bad_lm in bad_landmarks:
+            bad_l_id = self._get_lm_gtsam_id(bad_lm)
+            if L(bad_l_id) in marg_keys:
+                continue
+            if self.active_values.exists(L(bad_l_id)):
+                self.active_values.erase(L(bad_l_id))
 
-        #     print(f"【Backend】: Added {len(new_landmarks)} new landmarks and {len(new_visual_factors)} visual factors.")
-        # else:
-        #     print("【Backend】: Skipped visual landmarks and factors due to stationary state.")
 
-        # ======================= ZERO-VELOCITY UPDATE (ZUPT) & NO-MOTION POSE FACTOR =======================
+        # [D] 零速度更新 (ZUPT)
         if is_stationary:
-            # 添加零速度更新因子
-            last_kf_gtsam_id = self._get_kf_gtsam_id(last_keyframe.get_id())
-            kf_gtsam_id = self._get_kf_gtsam_id(new_keyframe.get_id())
             zero_velocity_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.03)
             zero_velocity_prior = gtsam.PriorFactorVector(V(kf_gtsam_id), np.zeros(3), zero_velocity_noise)
-            new_graph.add(zero_velocity_prior)
+            current_graph.add(zero_velocity_prior)
             print("【Backend】: Added Zero-Velocity-Update (ZUPT) factor.")
 
             # # 添加单位位姿因子
@@ -469,29 +440,45 @@ class Backend:
             # new_graph.add(gtsam.BetweenFactorPose3(X(last_kf_gtsam_id), X(kf_gtsam_id),      
             #               gtsam.Pose3(), no_motion_pose_noise))
             # print("【Backend】: Added No-Motion Pose Factor.")
-        # ============================================================================================
 
-        # 执行iSAM2增量更新
-        # graph = self.smoother.getFactors()
-        # print("【Backend】: graph: ", graph)
-        # print(f"【Backend】: Updating iSAM2 ({new_graph.size()} new factors, {new_estimates.size()} new variables)...")
-        
+        # ---------------------------------------------------------
+        # 2.5 清理孤儿变量：移除 active_values 中不被任何因子引用的变量
+        # ---------------------------------------------------------
+        graph_keys = set()
+        for i in range(current_graph.size()):
+            factor = current_graph.at(i)
+            if factor is not None:
+                for key in factor.keys():
+                    graph_keys.add(key)
+
+        orphan_keys = [k for k in self.active_values.keys() if k not in graph_keys]
+        if orphan_keys:
+            orphan_strs = [gtsam.DefaultKeyFormatter(k) for k in orphan_keys]
+            print(f"【Backend GC】: 清理 {len(orphan_keys)} 个孤儿变量: {orphan_strs}")
+            for k in orphan_keys:
+                self.active_values.erase(k)
+
+        # ---------------------------------------------------------
+        # 3. 执行局部 LM 优化
+        # ---------------------------------------------------------
         try:
             start_time = time.time()
-            self.smoother.update(new_graph, new_estimates, new_window_stamps)
-            end_time = time.time()
-            print(f"【Backend Timer】: Incremental optimization took { (end_time - start_time) * 1000:.3f} ms.")
-
-        # except Exception as e:
+            params = gtsam.LevenbergMarquardtParams()
+            optimizer = gtsam.LevenbergMarquardtOptimizer(current_graph, self.active_values, params)
+            self.active_values = optimizer.optimize()
+            print(f"【Backend】: Optimization took {(time.time() - start_time) * 1000:.2f} ms")
         except RuntimeError as e:
-            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("!!!!!!!!!! OPTIMIZATION FAILED !!!!!!!!!!!!!!")
-            print(f"ERROR: {e}")
+            print(f"【Backend】: New keyframe: {new_keyframe.get_id()}")
+            print(f"【Backend】: Old keyframe: {old_keyframe.get_id()}")
+            print(f"!!!!!!!!!! OPTIMIZATION FAILED !!!!!!!!!!!!!!\nERROR: {e}")
             return
 
+        # ---------------------------------------------------------
+        # 4. 更新最新状态及记录状态
+        # ---------------------------------------------------------
         # 更新最新bias
         latest_pose, latest_vel, latest_bias = self.get_latest_optimized_state()
-        print(f"【Backend】: Latest optimized state: pose: {latest_pose.matrix()}, velocity: {latest_vel}, bias: {latest_bias}")
+        # print(f"【Backend】: Latest optimized state: pose: {latest_pose.matrix()}, velocity: {latest_vel}, bias: {latest_bias}")
         latest_gtsam_id = self.next_gtsam_kf_id - 1
         if latest_bias is not None:
             self.latest_bias = latest_bias
@@ -501,21 +488,111 @@ class Backend:
              return
 
         # 记录优化误差
-        new_factors_error = self._log_optimization_error(new_graph)
+        new_factors_error = self._log_optimization_error(current_graph)
         self._log_state_and_errors(latest_gtsam_id, latest_pose, latest_vel, latest_bias, new_factors_error)
 
         print("【Backend】: Incremental optimization complete.")
 
+        # ---------------------------------------------------------
+        # 4. 滑动窗口边缘化 (调用 C++ 环境)
+        # ---------------------------------------------------------
+        oldest_gtsam_id = self.active_kf_gtsam_ids.pop(0) # 找到最老的帧
+        keys_to_marg_list = [X(oldest_gtsam_id), V(oldest_gtsam_id), B(oldest_gtsam_id)] # 需要边缘化的最老帧状态Key
 
-    def _log_optimization_error(self, new_factors_graph):
+        # 获取 oldest_gtsam_id 对应的原始 kf_id
+        oldest_kf_id = [k for k, v in self.kf_id_to_gtsam_id.items() if v == oldest_gtsam_id][0]
+
+        # 🔥 找出需要【连坐】边缘化的路标点（即第一次观测发生在最老帧的点）
+        lm_first_obs = {}
+        for kf_id, lm_id, pt_2d in window_visual_factors:
+            if lm_id not in lm_first_obs:
+                lm_first_obs[lm_id] = kf_id
+            else:
+                lm_first_obs[lm_id] = min(lm_first_obs[lm_id], kf_id)
+
+        # 只有生命周期起源于最老帧的点，才会被选中
+        lms_to_marg_ids = [lm for lm, first_kf in lm_first_obs.items() if first_kf == oldest_kf_id]
+
+        # 制定死亡名单
+        keys_to_marg_list = [X(oldest_gtsam_id), V(oldest_gtsam_id), B(oldest_gtsam_id)]
+        for lm_id in lms_to_marg_ids:
+            lm_gtsam_id = self._get_lm_gtsam_id(lm_id)
+            if self.active_values.exists(L(lm_gtsam_id)):
+                keys_to_marg_list.append(L(lm_gtsam_id))
+        
+        # 2. 构建边缘化图
+        marg_graph = gtsam.NonlinearFactorGraph()
+
+        # 1. 继承上一次的先验
+        if self.marg_factor is not None:
+            marg_graph.push_back(self.marg_factor)
+
+        # 2. 如果第0帧刚刚被砍，把初始化先验加上，传承火种
+        if oldest_gtsam_id == 0:
+            marg_graph.push_back(self.init_priors)
+
+        # 3. 找出【仅与最老帧相连】的 IMU 因子并加入
+        for imu_data in window_imu_factors:
+            id1 = self._get_kf_gtsam_id(imu_data['kf_id1'])
+            if id1 == oldest_gtsam_id:
+                id2 = self._get_kf_gtsam_id(imu_data['kf_id2'])
+                pim = imu_data['pim']
+                imu_factor = gtsam.CombinedImuFactor(
+                    X(id1), V(id1), X(id2), V(id2), B(id1), B(id2), pim)
+                marg_graph.push_back(imu_factor)
+
+        # 4. 是否需要添加观测数量少于一定值的视觉因子？（感觉不用）
+
+        # 🔥 核心修正：把待边缘化路标点的【所有】视觉观测加进来，提取先验防漂移！
+        for kf_id, lm_id, pt_2d in window_visual_factors:
+            if lm_id in lms_to_marg_ids:
+                k_id = self._get_kf_gtsam_id(kf_id)
+                l_id = self._get_lm_gtsam_id(lm_id)
+                if self.active_values.exists(X(k_id)) and self.active_values.exists(L(l_id)):
+                    pose = self.active_values.atPose3(X(k_id))
+                    point = self.active_values.atPoint3(L(l_id))
+                    
+                    # 建议在边缘化时使用固定基础噪声，防止 Huber 破坏舒尔补的线性化近似
+                    noise = gtsam.noiseModel.Isotropic.Sigma(2, 1.5) 
+                    factor = gtsam.GenericProjectionFactorCal3_S2(
+                        pt_2d, noise, X(k_id), L(l_id), self.K, body_P_sensor=self.body_T_cam)
+                    marg_graph.push_back(factor)
+
+        # 注意：我们【故意不加】任何视觉因子！让最老帧的视觉观测随风飘散
+        # 这样生成的 marg_factor 将绝对稀疏（只包含相邻的 Pose/Vel/Bias）
+
+        # 将 Python list 转换为 GTSAM/C++ 接受的 KeyVector
+        keys_to_marg = gtsam.KeyVector()
+        for k in keys_to_marg_list:
+            keys_to_marg.append(k)
+
+        # 直接调用 C++ 的 marginalizeOut
+        # 注意：这里的 marg_graph 包含了本次优化的所有IMU约束和上一次的先验，
+        # active_values 已经是刚才优化后的最新结果了，FEJ 极度精确！
         try:
-            optimized_result = self.smoother.calculateEstimate()
-            new_factors_error = new_factors_graph.error(optimized_result)
+            new_marg_factor = gtsam.marginalizeOut(marg_graph, self.active_values, keys_to_marg)
+            self.marg_factor = new_marg_factor # 更新先验
+            print(f"【Backend】: Marginalized old frame X({oldest_gtsam_id}) successfully.")
+        except Exception as e:
+            print(f"【Backend】: Marginalization Error: {e}")
 
-            current_full_graph = self.smoother.getFactors()
+        # 从 active_values 中彻底删除已被边缘化的变量
+        for k in keys_to_marg_list:
+            if self.active_values.exists(k):
+                self.active_values.erase(k)
 
-            print(f"【Backend】优化误差统计: "
-                  f"本轮新增因子误差 = {new_factors_error:.4f}")
+        # 🔥 绝对封杀：告诉后端，这些点已经化为先验，永远不要再出现！
+        for lm_id in lms_to_marg_ids:
+            self.marginalized_landmarks.add(lm_id)
+
+
+
+    def _log_optimization_error(self, current_full_graph):
+        try:
+            optimized_result = self.active_values
+            new_factors_error = current_full_graph.error(optimized_result)
+
+            print(f"【Backend】优化误差统计: 本轮全局误差 = {new_factors_error:.4f}")
 
             # ======================= DETAILED FACTOR ERROR LOGGING =======================
             debug_start_frame = 0 # 设为0以立即开始打印
@@ -526,26 +603,20 @@ class Backend:
                 # 遍历图中的所有因子
                 for i in range(current_full_graph.size()):
                     factor = current_full_graph.at(i)
-                    if factor is None: # 检查因子是否有效
+                    if factor is None: 
                         continue
                         
                     try:
-                        # 计算这个特定因子的误差
                         error = factor.error(optimized_result)
-                        
-                        # 打印误差大于阈值的因子，以避免日志刷屏
                         if error > 10.0: 
-                            # 打印因子的Python类名
                             factor_type = factor.__class__.__name__
                             print(f"  - Factor {i}: Error = {error:.4f}, Type = {factor_type}")
-                            
-                            # 尝试打印与该因子相关的Key
                             keys = factor.keys()
                             key_str = ", ".join([gtsam.DefaultKeyFormatter(key) for key in keys])
                             print(f"    Keys: [{key_str}]")
+                            # pass # 生产环境中可以关掉打印，或者写入日志
                             
                     except Exception as e_factor:
-                        # 捕获计算单个因子误差时可能发生的错误
                         print(f"  - Factor {i}: 无法计算误差或获取Keys. Error: {e_factor}")
 
                 print("="*100 + "\n")
@@ -555,7 +626,7 @@ class Backend:
             
         except Exception as e:
             print(f"[Error][Backend] 计算优化误差时出错: {e}")
-            return -1.0, -1.0
+            return -1.0
         
     def _log_state_and_errors(self, latest_gtsam_id, latest_pose, latest_vel, latest_bias, new_factors_error):
         position = latest_pose.translation()

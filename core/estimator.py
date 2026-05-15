@@ -26,8 +26,10 @@ class Estimator(threading.Thread):
         self.input_queue = input_queue
         self.local_map = LocalMap(config)
 
+        # IMU相关
         self.imu_processor = imu_processor
         self.imu_buffer = []
+        self.cached_imu_pims = {} # 格式: {(kf_id1, kf_id2): pim}，用于batch缓存
 
         self.backend = Backend(global_central_map, config, self.imu_processor)
 
@@ -366,6 +368,51 @@ class Estimator(threading.Thread):
             
         return is_still
 
+    # 收集当前滑窗内所有相邻关键帧之间的 IMU 预积分因子用于优化
+    def _gather_window_imu_factors(self, active_kfs):
+        window_imu_factors = []
+        for i in range(len(active_kfs) - 1):
+            id1 = active_kfs[i].get_id()
+            id2 = active_kfs[i+1].get_id()
+            
+            # 从缓存中直接拿，时间复杂度 O(1)
+            if (id1, id2) in self.cached_imu_pims:
+                window_imu_factors.append({
+                    'kf_id1': id1,
+                    'kf_id2': id2,
+                    'pim': self.cached_imu_pims[(id1, id2)]
+                })
+            else:
+                print(f"【Warning】丢失了 KF{id1} 到 KF{id2} 的 IMU 预积分！")
+        return window_imu_factors
+
+    # 收集当前滑窗内所有健康的 3D 路标点及它们的 2D 观测用于优化
+    def _gather_window_visual_data(self, active_kfs):
+        active_kf_ids = {kf.get_id() for kf in active_kfs}
+        window_landmarks = {}       # {lm_id: 3d_position}
+        window_visual_factors = []  # [(kf_id, lm_id, pt_2d), ...]
+
+        for lm_id, lm in self.local_map.landmarks.items():
+            # 1. 过滤黑名单
+            if lm_id in self.landmark_denylist:
+                continue
+            
+            # 2. 只打包已经成功三角化的点
+            if lm.status != LandmarkStatus.TRIANGULATED:
+                continue
+
+            # 3. 找出这个点在当前【活跃窗口】内的所有观测
+            obs_in_window = [(k_id, pt) for k_id, pt in lm.observations.items() if k_id in active_kf_ids]
+
+            # 4. 如果这个点在当前窗口内可见，才把它打包进去
+            if len(obs_in_window) > 0:
+                window_landmarks[lm_id] = lm.position_3d.copy() # 深拷贝阻断共享，前端有可能动lm
+                for k_id, pt in obs_in_window:
+                    pt_safe = pt.copy() if hasattr(pt, 'copy') else pt
+                    window_visual_factors.append((k_id, lm_id, pt_safe))
+
+        return window_landmarks, window_visual_factors
+
 
     def visual_inertial_initialization(self):
         print("【Init】: Buffer is full. Starting initialization process.")
@@ -387,6 +434,7 @@ class Estimator(threading.Thread):
             imu_factors = self.create_imu_factors(kf_start, kf_end)
             if imu_factors:
                 initial_imu_factors.append(imu_factors)
+                self.cached_imu_pims[(kf_start.get_id(), kf_end.get_id())] = imu_factors['imu_preintegration']
 
         # 视觉惯性初始化
         alignment_success, scale, gyro_bias, velocities, gravity_w = VIOInitializer.initialize(
@@ -447,6 +495,7 @@ class Estimator(threading.Thread):
                 self.local_map.landmarks
             )
             self.is_initialized = True
+            self.last_processed_kf_id = initial_keyframes[-1].get_id()
 
             # 用后端优化结果初始化最新的导航状态
             latest_pose, latest_velocity, _ = self.backend.get_latest_optimized_state()
@@ -624,20 +673,27 @@ class Estimator(threading.Thread):
             return
 
         last_kf = active_kfs[-2]
-        oldest_kf_id_in_window = active_kfs[0].get_id()
 
-        # 创建上一帧到当前帧的IMU因子
+        # ---------------------------------------------------------
+        # 1. 计算最新的一段 IMU 预积分并存入缓存（创建上一帧到当前帧的IMU因子）
+        # ---------------------------------------------------------
         start_time = time.time()
         imu_factor_data = self.create_imu_factors(last_kf, new_kf)
         end_time = time.time()
         print(f"【Estimator Timer】: IMU Factor Creation took {(end_time - start_time) * 1000:.3f} ms.")
-        if not imu_factor_data:
+        if imu_factor_data:
+            pim = imu_factor_data['imu_preintegration']
+            self.cached_imu_pims[(last_kf.get_id(), new_kf.get_id())] = pim
+        else:
             print(f"【Estimator】: No IMU factors between KF {last_kf.get_id()} and KF {new_kf.get_id()}.")
             return
 
         # is_currently_stationary = self.is_stationary(imu_factor_data['imu_measurements']) IMU零速检查
         is_currently_stationary = is_stationary
 
+        # ---------------------------------------------------------
+        # 2. 状态预测与新点三角化
+        # ---------------------------------------------------------
         # 从后端获取最新的优化结果
         last_pose, last_vel, last_bias = self.backend.get_latest_optimized_state()
         if last_pose is None:
@@ -651,85 +707,42 @@ class Estimator(threading.Thread):
         predicted_T_wb = predicted_nav_state.pose()
         predicted_vel = predicted_nav_state.velocity()
 
-        # 设置临时预测位姿
+        # 预测位姿设置当前帧初值
         new_kf.set_global_pose(predicted_T_wb.matrix())
 
         # 进行新特征点三角化
-        # if not is_stationary:
         new_landmarks = self.triangulate_new_landmarks()
-        # else:
-        #     # 静止状态，不进行新路标点三角化
-        #     new_landmarks = {}
-        print(f"【Tracking】: Not stationary. No new landmarks to triangulate.")
-
         if new_landmarks:
             print(f"【Tracking】: Triangulated {len(new_landmarks)} new landmarks.")
             print(f"【Tracking】: New landmarks: {new_landmarks.keys()}")
-
-        # DEBUG
-        suspect_lm_id = 7747
-        # DEBUG
         
-        # 为后端准备重投影因子
-        visual_factors_to_add = []
-        active_kf_ids = {kf.get_id() for kf in self.local_map.get_active_keyframes()}
-        for lm_id in new_landmarks.keys():
-            # 检查黑名单
-            if lm_id in self.landmark_denylist:
-                print(f"【Denylist Check】: Skipping blacklisted landmark {lm_id} from new triangulation")
-                continue
-            
-            lm = self.local_map.landmarks.get(lm_id)
-            if lm:
-                # DEBUG
-                if lm_id == suspect_lm_id:
-                    print(f"🕵️‍ [Trace l{suspect_lm_id}]: As new landmark. PASSED health check. Adding its factors...")
-                # DEBUG
-                for obs_kf_id, obs_pt_2d in lm.observations.items():
-                    # 只添加活跃窗口内关键帧的观测
-                    if obs_kf_id in active_kf_ids:
-                        # 指令格式: (关键帧ID, 路标点ID, 2D观测坐标)
-                        visual_factors_to_add.append((obs_kf_id, lm_id, obs_pt_2d))
-                        print(f"🕵️‍ [Trace l{lm_id}]: OBSERVED by new KF {obs_kf_id}. observation point: {obs_pt_2d}")
-                        # if lm_id == suspect_lm_id:
-                        #     print(f"🕵️‍ [Trace l{suspect_lm_id}]: OBSERVED by new KF {obs_kf_id}. observation point: {obs_pt_2d}")
-                            # print(f"🕵️‍ [Trace l{suspect_lm_id}]: OBSERVED by new KF {obs_kf_id}. observation point: {obs_pt_2d}")
+        # ---------------------------------------------------------
+        # 3. 生成 Backend 优化滑窗所需的数据包
+        # ---------------------------------------------------------
+        # 收集所有的 IMU 预积分
+        window_imu_factors = self._gather_window_imu_factors(active_kfs)
 
-        # 添加旧点重投影因子 (不在新三角化列表里)
-        for lm_id, pt_2d in zip(new_kf.get_visual_feature_ids(), new_kf.get_visual_features()):
-            # 检查黑名单（防御性检查）
-            if lm_id in self.landmark_denylist:
-                continue
-            
-            if lm_id not in new_landmarks:
-                # 必须是活跃点 (没有被剔除) 且已经三角化
-                if lm_id in self.local_map.landmarks and self.local_map.landmarks[lm_id].status == LandmarkStatus.TRIANGULATED:
-                    # DEBUG
-                    if lm_id == suspect_lm_id:
-                        print(f"🕵️‍ [Trace l{suspect_lm_id}]: As old landmark. PASSED health check. Adding its factors...")
-                        # print(f"🕵️‍ [Trace l{suspect_lm_id}]: lm}")
-                    # DEBUG
-                    visual_factors_to_add.append((new_kf.get_id(), lm_id, pt_2d))
+        # 收集所有健康的 3D 点和 2D 观测
+        window_landmarks, window_visual_factors = self._gather_window_visual_data(active_kfs)
 
-        print(f"【Debug】: Newly triangulated landmarks count: {len(new_landmarks)}")
-        print(f"【Debug】: Factor instructions generated: {len(visual_factors_to_add)}")
-
-        # 将预测结果作为初始估计值以及重投影约束、IMU约束送入后端
+        # ---------------------------------------------------------
+        # 4. 调用后端执行重建、优化和边缘化
+        # ---------------------------------------------------------
         start_time = time.time()
-        self.backend.optimize_incremental(
-            last_keyframe=last_kf,
-            new_keyframe=new_kf,
-            new_imu_factors=imu_factor_data,
-            new_landmarks=new_landmarks,
-            new_visual_factors=visual_factors_to_add,
-            initial_state_guess=(predicted_T_wb, predicted_vel, last_bias),
-            is_stationary=is_currently_stationary,
-            oldest_kf_id_in_window=oldest_kf_id_in_window
+        self.backend.window_optimize(
+            active_kfs=active_kfs,
+            window_imu_factors=window_imu_factors,
+            window_landmarks=window_landmarks,
+            window_visual_factors=window_visual_factors,
+            new_kf_initial_guess=(predicted_T_wb, predicted_vel, last_bias),
+            is_stationary=is_currently_stationary
         )
         end_time = time.time()
         print(f"【Estimator Timer】: Backend Incremental Optimization took {(end_time - start_time) * 1000:.3f} ms.")
 
-        # 优化结束，同步后端结果到Estimator
+        # ---------------------------------------------------------
+        # 5. 同步结果，清理无用的缓存
+        # ---------------------------------------------------------
         self.backend.update_estimator_map(active_kfs, self.local_map.landmarks)
         
         # 审计地图，移除所有变得不健康的"坏苹果"
@@ -738,11 +751,23 @@ class Estimator(threading.Thread):
         end_time = time.time()
         print(f"【Estimator Timer】: Map Audit took {(end_time - start_time) * 1000:.3f} ms.")
         
+        # 如果在优化过程中最老帧被边缘化移出了窗口，清理它的 IMU 缓存
+        current_active_kf_ids = {kf.get_id() for kf in self.local_map.get_active_keyframes()}
+        keys_to_delete = []
+        for (id1, id2) in self.cached_imu_pims.keys():
+            if id1 not in current_active_kf_ids or id2 not in current_active_kf_ids:
+                keys_to_delete.append((id1, id2))
+        for k in keys_to_delete:
+            del self.cached_imu_pims[k]
+
         # 更新预积分器的零偏
         _, _, latest_bias = self.backend.get_latest_optimized_state()
         if latest_bias:
             self.imu_processor.update_bias(latest_bias)
 
+        # ---------------------------------------------------------
+        # 6. 记录优化结果以及可视化
+        # ---------------------------------------------------------
         # 用后端优化结果更新最新的导航状态（位姿和速度）
         latest_pose, latest_velocity, _ = self.backend.get_latest_optimized_state()
         if latest_pose is not None and latest_velocity is not None:

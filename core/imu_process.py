@@ -25,6 +25,10 @@ class IMUProcessor:
         self.params.setBiasAccCovariance(np.eye(3) * accel_bias_rw_sigma**2) # 加计零偏随机游走
         self.params.setBiasOmegaCovariance(np.eye(3) * gyro_bias_rw_sigma**2) # 陀螺零偏随机游走
 
+        # 必须设置初始化偏置协方差,GTSAM旧特性
+        bias_acc_omega_init = np.eye(6) * 1e-5 
+        self.params.setBiasAccOmegaInit(bias_acc_omega_init)
+
         self.current_bias = gtsam.imuBias.ConstantBias()
 
     @staticmethod

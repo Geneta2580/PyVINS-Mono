@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/datasets/kitti/kitti_raw/2011_10_03/2011_10_03_drive_0034_sync"
+dataset_path: "/home/geneta/dataset/source_dataset/kitti/2011_09_30_drive_0034_sync"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "kitti"
@@ -118,7 +118,7 @@ new_landmark_inflation_ratio: 1.0
 use_imu_output: False
 
 # 是否可视化
-enable_viewer: True
+enable_viewer: False
 
 # 输出日志文件路径
 log_dir: "output/log"
