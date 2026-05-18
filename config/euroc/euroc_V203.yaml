@@ -114,7 +114,7 @@ rejection_threshold: 300.0
 use_imu_output: False
 
 # 是否可视化
-enable_viewer: True
+enable_viewer: False
 
 # 输出日志文件路径
 log_dir: "output/log"
