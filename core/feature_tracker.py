@@ -7,6 +7,7 @@ import queue
 from utils.dataloader import ImuMeasurement
 from core.visual_process import VisualProcessor
 from utils.debug import Debugger
+from utils.performance_stats import PerformanceStats
 
 class FeatureTracker(threading.Thread):
     def __init__(self, config, dataloader, imu_processor, output_queue):
@@ -30,16 +31,36 @@ class FeatureTracker(threading.Thread):
         log_columns = [
             "timestamp", "feature_count", "long_track_ratio", "mean_parallax", "is_kf", "is_stationary",
             "is_kf_visual", "is_kf_time", "is_kf_final",
+            "instant_fps", "avg_fps",
         ]
         self.logger = Debugger(self.config, file_prefix="feature_tracker", column_names=log_columns)
+
+        self.enable_fps_stats = self.config.get('enable_fps_stats', True)
+        self.fps_report_interval = self.config.get('fps_report_interval', 0)
+        self.fps_stats = PerformanceStats(name="frontend")
+        self._fps_summary_printed = False
+        self._logger_closed = False
 
     def start(self):
         self.is_running = True
         super().start()
 
+    def _report_fps_summary(self):
+        if (self.enable_fps_stats
+                and self.fps_stats.frame_count > 0
+                and not self._fps_summary_printed):
+            print(self.fps_stats.format_summary())
+            self._fps_summary_printed = True
+
+    def _close_logger(self):
+        if not self._logger_closed and hasattr(self.logger, 'close'):
+            self.logger.close()
+            self._logger_closed = True
+
     def shutdown(self):
         self.is_running = False
-        # join操作由主线程负责，这里只设置标志
+        self._report_fps_summary()
+        self._close_logger()
         print("Visual Feature Tracker shut down signal sent.")
 
     def run(self):
@@ -135,6 +156,20 @@ class FeatureTracker(threading.Thread):
                         stats["long_track_ratio"]
                     )
 
+                if self.enable_fps_stats:
+                    self.fps_stats.tick()
+                    instant_fps = self.fps_stats.instant_fps
+                    avg_fps = self.fps_stats.get_average_fps()
+                    if (self.fps_report_interval > 0
+                            and self.fps_stats.frame_count % self.fps_report_interval == 0):
+                        print(
+                            f"【Performance】frame #{self.fps_stats.frame_count}: "
+                            f"instant={instant_fps:.1f} fps, avg={avg_fps:.1f} fps"
+                        )
+                else:
+                    instant_fps = 0.0
+                    avg_fps = 0.0
+
                 # 写入日志：保留原有字段（is_kf保持视觉判定语义），新增3个is_kf字段
                 self.logger.log_state({
                     "timestamp": float(stats["timestamp"]),
@@ -147,6 +182,8 @@ class FeatureTracker(threading.Thread):
                     "is_kf_visual": int(is_kf_visual),
                     "is_kf_time": int(is_kf_time),
                     "is_kf_final": int(is_kf_final),
+                    "instant_fps": float(instant_fps),
+                    "avg_fps": float(avg_fps),
                 })
 
                 # 处理图像信息
@@ -175,4 +212,6 @@ class FeatureTracker(threading.Thread):
         except queue.Full:
             pass
         self.is_running = False
+        self._report_fps_summary()
+        self._close_logger()
         print("Visual Feature Tracker has finished processing all data.")
