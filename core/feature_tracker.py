@@ -17,6 +17,7 @@ class FeatureTracker(threading.Thread):
         self.output_queue = output_queue
 
         self.imu_processor = imu_processor
+        self.use_imu_flow_prediction = self.config.get('use_imu_flow_prediction', True)
         self.imu_buffer = deque()
         self.last_image_timestamp = None
         self.last_kf_timestamp = None
@@ -82,11 +83,12 @@ class FeatureTracker(threading.Thread):
                         'timestamp': timestamp,
                     }
                     # 存储IMU数据到缓冲区，用于光流初值预测
-                    self.imu_buffer.append((timestamp, data))
-                    # 保持缓冲区大小，只保留最近的IMU数据（例如最近1秒的数据）
-                    max_buffer_time = 1.0  # 秒
-                    while len(self.imu_buffer) > 0 and timestamp - self.imu_buffer[0][0] > max_buffer_time:
-                        self.imu_buffer.popleft()
+                    if self.use_imu_flow_prediction:
+                        self.imu_buffer.append((timestamp, data))
+                        # 保持缓冲区大小，只保留最近的IMU数据（例如最近1秒的数据）
+                        max_buffer_time = 1.0  # 秒
+                        while len(self.imu_buffer) > 0 and timestamp - self.imu_buffer[0][0] > max_buffer_time:
+                            self.imu_buffer.popleft()
                 try:
                     self.output_queue.put(imu_measurements, timeout=0.1)
                 except queue.Full:
@@ -100,7 +102,9 @@ class FeatureTracker(threading.Thread):
                 
                 # 准备IMU数据用于光流初值预测
                 imu_data_for_prediction = None
-                if self.last_image_timestamp is not None and len(self.imu_buffer) > 0:
+                if (self.use_imu_flow_prediction
+                        and self.last_image_timestamp is not None
+                        and len(self.imu_buffer) > 0):
                     # 获取从上一帧到当前帧的IMU测量数据
                     imu_measurements = [
                         (ts, imu_data) for ts, imu_data in self.imu_buffer
@@ -115,9 +119,9 @@ class FeatureTracker(threading.Thread):
                 
                 # 光流追踪特征点（返回stats和viz_payload）
                 undistorted_features, feature_ids, stats, viz = self.visual_processor.track_features(
-                    image_data, timestamp, 
+                    image_data, timestamp,
                     imu_data_for_prediction=imu_data_for_prediction,
-                    imu_processor=self.imu_processor
+                    imu_processor=self.imu_processor if self.use_imu_flow_prediction else None,
                 )
                 
                 # 更新上一帧图像时间戳

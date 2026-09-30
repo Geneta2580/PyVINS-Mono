@@ -243,21 +243,9 @@ class Estimator(threading.Thread):
     def triangulate_new_landmarks(self):
         newly_triangulated_for_backend = {}
         keyframe_window = self.local_map.get_active_keyframes()
-        # DEBUG
-        suspect_lm_id = 7747
-        # DEBUG
-        for lm in self.local_map.get_candidate_landmarks():
-            # DEBUG
-            if lm.id == suspect_lm_id:
-                print(f"🕵️‍ [Trace l{suspect_lm_id}]: Is a candidate. Checking for triangulation...")
-            # DEBUG
-            
-            is_ready, first_kf, last_kf = lm.is_ready_for_triangulation(keyframe_window, min_parallax=40)
+        for lm in self.local_map.get_candidate_landmarks():            
 
-            # DEBUG
-            if lm.id == suspect_lm_id and is_ready:
-                print(f"🕵️‍ [Trace l{suspect_lm_id}]: PASSED triangulation check (ready). Using KF {first_kf.get_id()} and KF {last_kf.get_id()}.")
-            # DEBUG
+            is_ready, first_kf, last_kf = lm.is_ready_for_triangulation(keyframe_window, min_parallax=40)
             
             if is_ready:
                 T_w_b_1 = first_kf.get_global_pose()
@@ -279,30 +267,16 @@ class Estimator(threading.Thread):
 
                 if len(points_3d_in_c1) > 0:
                     points_3d_world = (T_w_c_1[:3, :3] @ points_3d_in_c1.T + T_w_c_1[:3, 3].reshape(3, 1)).flatten()
-                    # DEBUG
-                    if lm.id == suspect_lm_id:
-                        print(f"🕵️‍ [Trace l{suspect_lm_id}]: TRIANGULATED successfully to position {points_3d_world}.")
-                    # DEBUG
-
                     is_healthy = self.local_map.check_landmark_health(lm.id, points_3d_world)
                     if is_healthy:
                         lm.set_triangulated(points_3d_world)
                         newly_triangulated_for_backend[lm.id] = points_3d_world
-                        # DEBUG
-                        if lm.id == suspect_lm_id:
-                            print(f"🕵️‍ [Trace l{suspect_lm_id}]: PASSED health check. Adding its factors...")
-                        # DEBUG
                     
                     else:
-                        # DEBUG
-                        if lm.id == suspect_lm_id:
-                            print(f"🕵️‍ [Trace l{suspect_lm_id}]: FAILED health check. Not adding its factors...")
-                        # DEBUG
                         continue
                 
                 else:
-                    if lm.id == suspect_lm_id:
-                            print(f"🕵️‍ [Trace l{suspect_lm_id}]: FAILED multi-view validation after triangulation.")
+                    continue
     
         return newly_triangulated_for_backend
             
@@ -751,15 +725,6 @@ class Estimator(threading.Thread):
         end_time = time.time()
         print(f"【Estimator Timer】: Map Audit took {(end_time - start_time) * 1000:.3f} ms.")
         
-        # 如果在优化过程中最老帧被边缘化移出了窗口，清理它的 IMU 缓存
-        current_active_kf_ids = {kf.get_id() for kf in self.local_map.get_active_keyframes()}
-        keys_to_delete = []
-        for (id1, id2) in self.cached_imu_pims.keys():
-            if id1 not in current_active_kf_ids or id2 not in current_active_kf_ids:
-                keys_to_delete.append((id1, id2))
-        for k in keys_to_delete:
-            del self.cached_imu_pims[k]
-
         # 更新预积分器的零偏
         _, _, latest_bias = self.backend.get_latest_optimized_state()
         if latest_bias:

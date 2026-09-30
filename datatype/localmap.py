@@ -181,18 +181,6 @@ class LocalMap:
             print(f"【Triangulation Health Check】: Landmark {lm.id} failed reprojection in KF {kf.get_id()}. Error: {reproj_error_avg:.2f}px")
             return False
 
-        if landmark_id == 14815: # 您可以修改为您想追踪的任何ID
-            is_healthy = ratio >= threshold # 重新计算一下最终结果
-            print("\n--- 🩺 Health Check Debug ---")
-            print(f"  Landmark ID: {landmark_id}")
-            print(f"  Observing KF IDs in window: {[kf.get_id() for kf in witness_kfs]}")
-            print(f"  Baseline (B): {baseline:.4f} m")
-            print(f"  Avg Depth (D): {depth:.4f} m")
-            print(f"  Ratio (B/D): {ratio:.4f}")
-            print(f"  Threshold (rad): {threshold:.4f}")
-            print(f"  Result: {'HEALTHY (True)' if is_healthy else 'UNHEALTHY (False)'}")
-            print("--- End of Health Check Debug ---\n")
-
         return True
 
     

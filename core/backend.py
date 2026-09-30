@@ -131,13 +131,15 @@ class Backend:
                 print(f"【Backend】: 已移除 landmark {lm_id} 的ID映射")
 
     def _create_smart_params(self):
-        """统一配置 SmartFactor 的参数，防退化配置"""
+        """基于当前 GTSAM 版本定制的 SmartFactor 极限防退化配置"""
         smart_params = gtsam.SmartProjectionParams()
+        
+        # 1. 核心：必须使用 HESSIAN 模式进行隐式舒尔补
         smart_params.setLinearizationMode(gtsam.LinearizationMode.HESSIAN) 
-        try:
-            smart_params.setDegeneracyMode(gtsam.DegeneracyMode.ZERO_ON_DEGENERACY)
-        except AttributeError:
-            print("[Backend Warning]: GTSAM version might be old, DegeneracyMode not found.")
+        
+        # 2. 防崩溃：遇到退化点（如纯旋转）贡献 0 误差，防止矩阵奇异
+        smart_params.setDegeneracyMode(gtsam.DegeneracyMode.ZERO_ON_DEGENERACY)
+        
         return smart_params
 
     def initialize_optimize(self, initial_keyframes, initial_imu_factors, initial_landmarks, initial_velocities, initial_bias):

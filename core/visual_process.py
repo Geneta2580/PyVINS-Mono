@@ -53,6 +53,9 @@ class VisualProcessor:
         self.ransac_threshold = self.config.get('ransac_threshold', 1.0)  # 像素阈值
         self.ransac_prob = self.config.get('ransac_prob', 0.999)  # RANSAC置信度
 
+        # IMU辅助光流预测
+        self.use_imu_flow_prediction = self.config.get('use_imu_flow_prediction', True)
+
     # 提取特征点
     def detect_features(self, gray_image, max_corners, mask=None):
         return cv2.goodFeaturesToTrack(
@@ -194,9 +197,12 @@ class VisualProcessor:
             return undistorted_pts, self.prev_pt_ids, stats, viz_payload
 
         # 非第一帧处理逻辑       
-        # 使用IMU预测的初值（如果提供）
+        # 使用IMU预测的初值（如果提供且已开启）
         initial_pts = predicted_pts
-        if initial_pts is None and imu_data_for_prediction is not None and imu_processor is not None:
+        if (self.use_imu_flow_prediction
+                and initial_pts is None
+                and imu_data_for_prediction is not None
+                and imu_processor is not None):
             # 使用GTSAM预积分计算旋转并预测光流初值
             print(f"【VisualProcessor】Using IMU prediction for initial points")
             initial_pts = self._predict_optical_flow_with_imu(imu_data_for_prediction, imu_processor)
@@ -348,6 +354,10 @@ class VisualProcessor:
         # 条件2：长追踪点比例小于最小长追踪比例
         if len(good_ids) > 0 and long_track_ratio < self.min_long_track_ratio:
             is_kf_visual = 1
+        # 判断关键视觉条件3：
+        # 跟踪到的特征点数量小于最小跟踪比例（新特征点数量大于一定比例），则认为是关键帧
+        if len(good_curr) < (self.max_features_to_detect * self.min_track_ratio):
+            is_kf_visual = 1
 
         num_current_features = len(good_curr)
 
@@ -356,11 +366,6 @@ class VisualProcessor:
         
         # 补充特征点
         if len(good_curr) < self.max_features_to_detect:
-            # 判断关键视觉条件3：
-            # 跟踪到的特征点数量小于最小跟踪比例（新特征点数量大于一定比例），则认为是关键帧
-            if len(good_curr) < (self.max_features_to_detect * self.min_track_ratio):
-                is_kf_visual = 1
-
             # 使用重过滤生成的mask来检测新特征点
             num_new_features_needed = self.max_features_to_detect - num_current_features
             new_pts = self.detect_features(curr_gray, num_new_features_needed, mask=age_mask)

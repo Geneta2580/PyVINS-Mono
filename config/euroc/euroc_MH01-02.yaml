@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_01_easy"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_02_easy"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -47,6 +47,9 @@ cam_intrinsics: [458.654, 0.000, 367.215,
 # 相机畸变参数
 distortion_model: "fisheye"
 distortion_coefficients: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
+
+# 是否使用IMU预积分旋转预测光流初值
+use_imu_flow_prediction: False
 
 # RANSAC相关参数
 use_ransac: False
@@ -118,6 +121,11 @@ enable_viewer: False
 
 # 输出日志文件路径
 log_dir: "output/log"
+
+# 帧率统计：每帧记录 instant_fps / avg_fps；结束时打印平均帧率
+enable_fps_stats: True
+# 运行中每隔 N 帧打印一次 FPS（0 表示仅结束时打印）
+fps_report_interval: 0
 
 # 输出轨迹文件路径
 trajectory_output_path: "output/estimated_trajectory.txt" 
