@@ -30,16 +30,20 @@ def calculate_preintegration_and_jacobian(measurements, start_time, initial_bias
     # 确保零偏也是正确的类型
     initial_bias_gyro = np.asarray(initial_bias_gyro, dtype=float)
     
-    last_ts = start_time
-    for ts, data in measurements:
-        dt = ts - last_ts
+    if len(measurements) < 2:
+        return None, None, None, None
+
+    for index in range(len(measurements) - 1):
+        timestamp, measurement = measurements[index]
+        next_timestamp, next_measurement = measurements[index + 1]
+        dt = next_timestamp - timestamp
         if dt <= 0:
-            last_ts = ts
             continue
 
-        # 【修正2】: 强制将输入数据转换为 float 类型的 Numpy 数组
-        accel = np.asarray(data.accel, dtype=float)
-        gyro = np.asarray(data.gyro, dtype=float)
+        accel = 0.5 * (
+            np.asarray(measurement.accel, dtype=float) + np.asarray(next_measurement.accel, dtype=float))
+        gyro = 0.5 * (
+            np.asarray(measurement.gyro, dtype=float) + np.asarray(next_measurement.gyro, dtype=float))
 
         gyro_corrected = gyro - initial_bias_gyro
         delta_R_step = Rotation.from_rotvec(gyro_corrected * dt).as_matrix()
@@ -54,8 +58,6 @@ def calculate_preintegration_and_jacobian(measurements, start_time, initial_bias
         delta_P_vec += delta_V_vec * dt + 0.5 * accel_body * dt**2
         delta_V_vec += accel_body * dt
         delta_R_mat = delta_R_mat @ delta_R_step
-        
-        last_ts = ts
 
     return delta_R_mat, delta_V_vec, delta_P_vec, J_R_bg
 

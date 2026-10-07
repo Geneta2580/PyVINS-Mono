@@ -140,7 +140,7 @@ class Debugger:
 
         参数:
         file_handle (File): 用于写入的文件句柄。
-        keyframe (KeyFrame): 包含位姿和时间戳的关键帧对象。
+        keyframe (Frame): 包含位姿和时间戳的帧对象。
         """
         if not file_handle:
             return

@@ -30,6 +30,87 @@ class IMUProcessor:
         self.params.setBiasAccOmegaInit(bias_acc_omega_init)
 
         self.current_bias = gtsam.imuBias.ConstantBias()
+        self.max_imu_dt = config.get('max_imu_dt', 0.0125)
+
+    @staticmethod
+    def _as_sample(measurement):
+        return (
+            np.asarray(measurement.accel, dtype=float).reshape(3),
+            np.asarray(measurement.gyro, dtype=float).reshape(3),
+        )
+
+    @staticmethod
+    def _interpolate_measurement(timestamp, sample_0, sample_1):
+        t0, measurement_0 = sample_0
+        t1, measurement_1 = sample_1
+        accel_0, gyro_0 = IMUProcessor._as_sample(measurement_0)
+        accel_1, gyro_1 = IMUProcessor._as_sample(measurement_1)
+        if abs(t1 - t0) < 1e-12:
+            accel, gyro = accel_0, gyro_0
+        else:
+            ratio = (timestamp - t0) / (t1 - t0)
+            accel = accel_0 + ratio * (accel_1 - accel_0)
+            gyro = gyro_0 + ratio * (gyro_1 - gyro_0)
+
+        class BoundedImuMeasurement:
+            pass
+
+        sample = BoundedImuMeasurement()
+        sample.accel = accel
+        sample.gyro = gyro
+        return sample
+
+    def build_bounded_imu_samples(self, timed_measurements, start_time, end_time):
+        """补上 start/end 的线性插值样本，供中值积分使用。"""
+        if end_time <= start_time or len(timed_measurements) < 2:
+            return None
+        samples = sorted(timed_measurements, key=lambda item: item[0])
+        left_index = None
+        right_index = None
+        for index, (timestamp, _) in enumerate(samples):
+            if timestamp <= start_time + 1e-9:
+                left_index = index
+            if right_index is None and timestamp >= end_time - 1e-9:
+                right_index = index
+                break
+        if left_index is None or right_index is None or right_index < left_index:
+            print(
+                f"【IMU】: Cannot bracket [{start_time:.6f}, {end_time:.6f}] "
+                f"with {len(samples)} IMU samples."
+            )
+            return None
+        if abs(samples[left_index][0] - start_time) <= 1e-8:
+            start_measurement = samples[left_index][1]
+        elif left_index + 1 < len(samples):
+            start_measurement = self._interpolate_measurement(
+                start_time, samples[left_index], samples[left_index + 1])
+        else:
+            return None
+
+        # 右边界
+        if abs(samples[right_index][0] - end_time) <= 1e-8:
+            end_measurement = samples[right_index][1]
+        elif right_index > 0:
+            end_measurement = self._interpolate_measurement(
+                end_time, samples[right_index - 1], samples[right_index])
+        else:
+            return None
+
+        bounded = [(start_time, start_measurement)]
+        for index in range(left_index + 1, right_index):
+            timestamp = samples[index][0]
+            if start_time + 1e-8 < timestamp < end_time - 1e-8:
+                bounded.append(samples[index])
+        bounded.append((end_time, end_measurement))
+
+        deduplicated = []
+        for timestamp, measurement in bounded:
+            if deduplicated and abs(timestamp - deduplicated[-1][0]) <= 1e-8:
+                continue
+            deduplicated.append((timestamp, measurement))
+        if len(deduplicated) < 2:
+            return None
+        return deduplicated
 
     @staticmethod
     def get_imu_interval_with(imu_buffer_deque: deque, end_time: float) -> Tuple[List[ImuData], deque]:
@@ -89,40 +170,50 @@ class IMUProcessor:
         
         return current_pose, current_velocity
 
-    def pre_integration(self, measurements: List[ImuData], start_time: float, end_time: float, override_bias = None):
-
+    def pre_integration(self, measurements: List[ImuData], start_time: float, end_time: float,
+                        override_bias=None, log_stats=False):
+        """对已经包含起止边界的样本做中值预积分。bias 交给 GTSAM，不在这里减掉。"""
         if len(measurements) < 2:
             print("[Warning] Not enough IMU measurements to perform pre-integration.")
             return None
 
-        if override_bias is not None:
-            # print("【IMU_process】: Using override bias")
-            current_bias = override_bias
-        else:
-            # 假设每次都从零偏置开始，在实际系统中，这里应该传入上一个关键帧优化后的偏置
-            current_bias = self.current_bias
-
+        current_bias = override_bias if override_bias is not None else self.current_bias
         preintegrated_measurements = gtsam.PreintegratedCombinedMeasurements(self.params, current_bias)
 
-        # 逐段积分IMU数据
-        last_timestamp = start_time
-        for imu_data in measurements:
-            timestamp, data = imu_data
+        dts = []
+        for index in range(len(measurements) - 1):
+            timestamp, measurement = measurements[index]
+            next_timestamp, next_measurement = measurements[index + 1]
+            dt = next_timestamp - timestamp
+            if dt <= 0.0:
+                print(f"【IMU】: Non-positive dt {dt:.9f} at t={timestamp:.6f}. Reject factor.")
+                return None
+            if dt > self.max_imu_dt:
+                print(f"【IMU】: Gap warning dt={dt:.6f}s between {timestamp:.6f} and {next_timestamp:.6f}.")
+            accel = 0.5 * (
+                np.asarray(measurement.accel, dtype=float) + np.asarray(next_measurement.accel, dtype=float))
+            gyro = 0.5 * (
+                np.asarray(measurement.gyro, dtype=float) + np.asarray(next_measurement.gyro, dtype=float))
+            preintegrated_measurements.integrateMeasurement(accel, gyro, dt)
+            dts.append(dt)
 
-            if timestamp >= last_timestamp:
-                dt = timestamp - last_timestamp # 注意这里的单位应该是s
-                if dt <=0:
-                    continue
-
-                preintegrated_measurements.integrateMeasurement(data.accel, data.gyro, dt)
-
-                last_timestamp = timestamp
-
-        # 对最后一段IMU进行积分
-        final_dt = end_time - last_timestamp
-        if final_dt > 0:
-            last_accel = measurements[-1][1].accel
-            last_gyro = measurements[-1][1].gyro
-            preintegrated_measurements.integrateMeasurement(last_accel, last_gyro, final_dt)
-
+        duration = end_time - start_time
+        sum_dt = float(np.sum(dts))
+        if abs(sum_dt - duration) > 1e-6:
+            print(
+                f"【IMU】: Integrated duration {sum_dt:.9f} differs from "
+                f"frame interval {duration:.9f}. Reject factor."
+            )
+            return None
+        delta_t = float(preintegrated_measurements.deltaTij())
+        if abs(delta_t - duration) > 1e-6:
+            print(f"【IMU】: PIM.deltaTij {delta_t:.9f} != interval {duration:.9f}. Reject factor.")
+            return None
+        if log_stats:
+            print(
+                f"【IMU】: samples={len(measurements)} dt[min/mean/max]="
+                f"{min(dts):.6f}/{np.mean(dts):.6f}/{max(dts):.6f} "
+                f"bounds=[{measurements[0][0]:.6f}, {measurements[-1][0]:.6f}] "
+                f"deltaTij={delta_t:.6f} interval={duration:.6f}"
+            )
         return preintegrated_measurements

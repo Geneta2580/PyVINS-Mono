@@ -5,7 +5,7 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/V1_01_easy"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_05_difficult"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -15,22 +15,22 @@ dataset_type: "euroc"
 window_size: 10
 
 # 初始化三角化两帧视差阈值
-initial_parallax: 70
+initial_parallax: 40
 
 # 初始SFM三角化重投影误差阈值
 initial_sfm_reprojection_threshold: 1.5
 
-# 选择关键帧最小视差
-min_parallax: 8
+# 选择关键帧最小视差 10
+min_parallax: 10
 
 # 静止视差
 min_stationary_parallax: 0.5
 
 # 最大特征点数
-max_features_to_detect: 200
+max_features_to_detect: 150
 
 # 最小跟踪比例
-min_track_ratio: 0.6
+min_track_ratio: 0.5
 
 # 最小跟踪比例
 min_kf_interval: 0.2 # 最小关键帧时间间隔(s) 0.2
@@ -40,16 +40,19 @@ max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
 min_dist: 30
 
 # 相机内参
-cam_intrinsics: [458.654, 0.000, 367.215,
-                 0.000, 457.296, 248.375, 
-                 0.000, 0.000, 1.000]
+cam_intrinsics: [461.6, 0.0, 363.0,
+                 0.0, 460.3, 248.1,
+                 0.0, 0.0, 1.0]
 
 # 相机畸变参数
 distortion_model: "radtan"
-distortion_coefficients: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
+distortion_coefficients: [-0.2917, 0.08228, 0.00005333, -0.0001578]
+
+# 是否使用IMU预积分旋转预测光流初值
+use_imu_flow_prediction: False
 
 # RANSAC相关参数
-use_ransac: False
+use_ransac: True
 ransac_threshold: 1.0
 ransac_prob: 0.999
 
@@ -61,26 +64,22 @@ visualize: True
 gravity: 9.81
 
 # 注意这里只是sigma，不是sigma^2
-accel_noise_sigma: 0.008          # 从0.002改为0.008
-accel_bias_rw_sigma: 0.0003        # 从0.0003改为0.001
-gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
+accel_noise_sigma: 0.004          # 从0.002改为0.008
+gyro_noise_sigma: 0.00025        # 从0.0003改为0.001
+accel_bias_rw_sigma: 0.003        # 从0.00016968改为0.0008
+gyro_bias_rw_sigma: 0.00002     # 从0.000019393改为0.00008
 
-# accel_noise_sigma: 0.02          # 从0.002改为0.008
-# accel_bias_rw_sigma: 0.001        # 从0.0003改为0.001
-# gyro_noise_sigma: 0.0004        # 从0.00016968改为0.0008
-# gyro_bias_rw_sigma: 0.00004     # 从0.000019393改为0.00008
 
 # ============================================= 地图管理参数 =============================================
 # 三角化新地图点条件检查
-max_depth: 400 # 地图点三角化深度检查是否正常
+max_depth: 60 # 地图点三角化深度检查是否正常
 min_depth: 0.2
 min_parallax_angle_deg: 5.0 # 三角化新地图点最小视差角度
-triangulation_max_reprojection_error: 40.0 # 三角化新地图点最大重投影误差
+triangulation_max_reprojection_error: 5.0 # 三角化新地图点最大重投影误差
 
-# 优化新地图点最大重投影误差(只有开启优化后抑制不良优化点才有效)
-optimization_max_reprojection_error: 40.0 # 优化新地图点最大重投影误差
-optimization_max_delete_reprojection_error: 1000.0 # 优化新地图点最大删除重投影误差
+# 优化新地图点最大重投影误差
+optimization_max_reprojection_error: 15.0 # 地图点进入优化窗口的最大重投影误差
+optimization_max_delete_reprojection_error: 40.0 # 优化新地图点最大删除重投影误差(只有开启优化后抑制不良优化点才有效)
 
 
 # ============================================= 后端配置参数 =============================================
@@ -88,11 +87,11 @@ optimization_max_delete_reprojection_error: 1000.0 # 优化新地图点最大删
 init_window_size: 10
 
 # 边缘化窗口大小
-lag_window_size: 9 # 10-1
+ba_window_size: 29 # 10-1
 
 # 初始化外参
 T_bc: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
-       0.999557249008, -0.0149672133247, 0.025715529948, -0.064676986768,
+       0.999557249008, 0.0149672133247, 0.025715529948, -0.064676986768,
       -0.0257744366974, 0.00375618835797, 0.999660727178, 0.00981073058949,
        0.0, 0.0, 0.0, 1.0]
 
@@ -122,6 +121,11 @@ enable_viewer: False
 
 # 输出日志文件路径
 log_dir: "output/log"
+
+# 帧率统计：每帧记录 instant_fps / avg_fps；结束时打印平均帧率
+enable_fps_stats: True
+# 运行中每隔 N 帧打印一次 FPS（0 表示仅结束时打印）
+fps_report_interval: 0
 
 # 输出轨迹文件路径
 trajectory_output_path: "output/estimated_trajectory.txt" 

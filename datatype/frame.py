@@ -1,8 +1,8 @@
 import numpy as np
 
-class KeyFrame:
-    def __init__(self, kf_id, timestamp):
-        self.id = kf_id
+class Frame:
+    def __init__(self, frame_id, timestamp):
+        self.id = frame_id
         self.timestamp = timestamp
 
         self.image = None
@@ -14,6 +14,7 @@ class KeyFrame:
         self.visual_feature_ids = None
 
         self.is_stationary = False
+        self.is_keyframe = False
 
     # 写入类信息(write)
     def set_image(self, image):
@@ -35,6 +36,9 @@ class KeyFrame:
 
     def set_is_stationary(self, is_stationary):
         self.is_stationary = is_stationary
+
+    def set_is_keyframe(self, is_keyframe):
+        self.is_keyframe = bool(is_keyframe)
 
     # 读取类信息(read)
     def get_id(self):
@@ -63,3 +67,6 @@ class KeyFrame:
     
     def get_is_stationary(self):
         return self.is_stationary
+
+    def get_is_keyframe(self):
+        return self.is_keyframe

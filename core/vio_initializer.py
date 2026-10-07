@@ -17,8 +17,8 @@ class VIOInitializer:
         initial_gyro_bias = np.zeros(3)
 
         for factor_info in imu_factors:
-            start_ts = factor_info['start_kf_timestamp']
-            end_ts = factor_info['end_kf_timestamp']
+            start_ts = factor_info['start_timestamp']
+            end_ts = factor_info['end_timestamp']
             raw_measurements = factor_info['imu_measurements']
 
             # 获取对应视觉KF
@@ -59,8 +59,8 @@ class VIOInitializer:
         for factor_info in imu_factors:
             repropagated_result = imu_processor.pre_integration(
                 factor_info['imu_measurements'],
-                factor_info['start_kf_timestamp'],
-                factor_info['end_kf_timestamp'],
+                factor_info['start_timestamp'],
+                factor_info['end_timestamp'],
                 override_bias = new_bias
             )
             if repropagated_result:
@@ -79,8 +79,8 @@ class VIOInitializer:
 
         for i, factor_info in enumerate(imu_factors):
             pim = factor_info['imu_preintegration']
-            start_ts = factor_info['start_kf_timestamp']
-            end_ts = factor_info['end_kf_timestamp']
+            start_ts = factor_info['start_timestamp']
+            end_ts = factor_info['end_timestamp']
 
             kf_start = next((kf for kf in keyframes if kf.get_timestamp() == start_ts), None)
             kf_end = next((kf for kf in keyframes if kf.get_timestamp() == end_ts), None)
@@ -171,7 +171,7 @@ class VIOInitializer:
         # print(f"【System Init】: H: {H}")
         # print(f"【System Init】: b: {b}")
         # Debugger.visualize_matrix(H, title="Hessian Matrix", save_path="hessian_matrix.png")
-        Debugger.save_full_matrix_python(H)
+        # Debugger.save_full_matrix_python(H)
         
         H = H * 1000.0
         b = b * 1000.0
@@ -211,8 +211,8 @@ class VIOInitializer:
 
             for i, factor_info in enumerate(imu_factors):
                 pim = factor_info['imu_preintegration']
-                start_ts = factor_info['start_kf_timestamp']
-                end_ts = factor_info['end_kf_timestamp']
+                start_ts = factor_info['start_timestamp']
+                end_ts = factor_info['end_timestamp']
 
                 kf_start = next((kf for kf in keyframes if kf.get_timestamp() == start_ts), None)
                 kf_end = next((kf for kf in keyframes if kf.get_timestamp() == end_ts), None)
@@ -347,7 +347,7 @@ class VIOInitializer:
             pose_c0_bi_R_with_scale = pose_c0_bi_with_scale[:3, :3]
             pose_c0_bi_t_with_scale = pose_c0_bi_with_scale[:3, 3]
             
-            # 更新KeyFrame中的全局位姿，这里不需要乘外参
+            # 更新 Frame 中的全局位姿，这里不需要乘外参
             # 因为后续还可以使用global_pose来计算新帧的global_pose(T_w_ci*T_ci_cj)
             T_w_bi = np.eye(4)
             T_w_bi[:3, :3] = R_final_w_c0 @ pose_c0_bi_R_with_scale

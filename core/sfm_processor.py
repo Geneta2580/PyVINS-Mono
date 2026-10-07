@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import gtsam
+from gtsam.symbol_shorthand import L, X
 
 class SfMProcessor:
     def __init__(self, config, cam_intrinsics):
@@ -115,7 +117,7 @@ class SfMProcessor:
             self.cam_intrinsics, None
         )
 
-        if not success:
+        if not success or inliers is None or len(inliers) < 10:
             return False, None
 
         R, _ = cv2.Rodrigues(rvec)
@@ -147,4 +149,322 @@ class SfMProcessor:
         reprojection_mask = (error1 < self.reprojection_threshold) & (error2 < self.reprojection_threshold)
         filtered_points_3d = points_3d[reprojection_mask]
         
-        return filtered_points_3d, reprojection_mask    
+        return filtered_points_3d, reprojection_mask
+
+    def build_feature_tracks(self, frames):
+        """把初始化窗口里的去畸变像素观测收成 feature_id -> [(frame_idx, uv), ...]。"""
+        raw = {}
+        for frame_idx, frame in enumerate(frames):
+            feature_ids = frame.get_visual_feature_ids()
+            features = frame.get_visual_features()
+            if feature_ids is None or features is None:
+                continue
+            for feature_id, uv in zip(feature_ids, features):
+                raw.setdefault(int(feature_id), {})[frame_idx] = np.asarray(uv, dtype=float).reshape(2)
+        tracks = {}
+        for feature_id, observations in raw.items():
+            if len(observations) < 2:
+                continue
+            tracks[feature_id] = sorted(observations.items())
+        return tracks
+
+    def initialize_window(self, frames, min_parallax):
+        """参考帧对最新帧做相对位姿，再交替 PnP / 三角化，最后做固定尺度的视觉 BA。"""
+        if len(frames) < 2:
+            return None
+        parallax_threshold = float(min_parallax)
+        # 构建特征匹配对
+        tracks = self.build_feature_tracks(frames) 
+        # 选择参考帧（视差最大，匹配点数最多），作为初始化窗口的参考帧，同时返回参考帧的位姿和最新帧的E阵分解的旋转和平移
+        selected = self._select_reference_pair(frames, parallax_threshold)
+
+        if selected is None:
+            return None
+        ref_idx, newest_idx, rotation, translation = selected
+
+        # 选定初始化帧对的位姿基线
+        poses = [None] * len(frames)
+        poses[ref_idx] = np.eye(4)
+        relative = np.eye(4)
+        relative[:3, :3] = rotation
+        relative[:3, 3] = np.asarray(translation, dtype=float).reshape(3)
+        poses[newest_idx] = np.linalg.inv(relative)
+        initial_baseline = np.linalg.norm(poses[newest_idx][:3, 3])
+
+        # 三角化初始化帧对的特征点，得到初始化的3D点
+        landmarks = {}
+        landmarks = self._triangulate_available(tracks, poses, landmarks, max_error=5.0)
+        print(f"【Visual Init】: Seed triangulation kept {len(landmarks)} landmarks.")
+
+        # 交替PnP / 三角化，直到所有帧的位姿都被优化
+        for round_idx in range(len(frames) * 2):
+            if all(pose is not None for pose in poses):
+                break
+            progressed = False
+            for frame_idx, pose in enumerate(poses):
+                if pose is not None:
+                    continue
+                success, solved = self.track_with_pnp(landmarks, frames[frame_idx])
+                # 检查PnP是否成功，并且重投影误差是否小于阈值
+                if not success or not self._accept_pnp(solved, landmarks, frames[frame_idx]):
+                    continue
+                poses[frame_idx] = solved
+                progressed = True
+            if not progressed:
+                break
+            # 对已有多帧匹配轨迹、但尚未生成三维点的特征进行补充三角化
+            landmarks = self._triangulate_available(tracks, poses, landmarks, max_error=5.0)
+            posed = sum(pose is not None for pose in poses)
+            print(f"【Visual Init】: round {round_idx} posed {posed}/{len(poses)}, landmarks {len(landmarks)}")
+
+        missing = [frames[idx].get_id() for idx, pose in enumerate(poses) if pose is None]
+        # 检查是否有帧的位姿没有被优化
+        if missing:
+            print(f"【Visual Init】: PnP left frames without pose: {missing}")
+            return None
+        landmarks = self._triangulate_available(tracks, poses, landmarks, max_error=5.0)
+        # 优化初始化帧对的位姿和世界点
+        return self.bundle_adjust_initial_window(
+            frames, tracks, poses, landmarks, ref_idx, newest_idx, initial_baseline)
+
+    def _select_reference_pair(self, frames, min_parallax):
+        # 选择最新帧作为参考帧
+        newest_idx = len(frames) - 1
+        best = None
+        for ref_idx in range(newest_idx):
+            # 计算本质矩阵
+            success, inlier_ids, pts1, pts2, rotation, translation = self.epipolar_compute(
+                frames[ref_idx], frames[newest_idx])
+            if not success:
+                continue
+            # 计算视差
+            parallax = float(np.median(np.linalg.norm(pts1 - pts2, axis=1)))
+            print(
+                f"  - Pair (KF {frames[ref_idx].get_id()}, newest {frames[newest_idx].get_id()}) "
+                f"parallax {parallax:.2f} px, matches {len(inlier_ids)}"
+            )
+            # 过滤视差小于阈值或匹配点数小于30的帧
+            if parallax < min_parallax or len(inlier_ids) < 30:
+                continue
+            score = (parallax, len(inlier_ids))
+            # 选择最佳帧
+            if best is None or score > best[0]:
+                best = (score, ref_idx, rotation, translation, parallax, len(inlier_ids))
+        if best is None:
+            print("【Visual Init】: No reference frame has enough parallax against the newest frame.")
+            return None
+        _, ref_idx, rotation, translation, parallax, match_count = best
+        print(
+            f"【Visual Init】: Selected ref KF {frames[ref_idx].get_id()} <-> "
+            f"newest KF {frames[newest_idx].get_id()}, parallax {parallax:.2f} px, matches {match_count}"
+        )
+        return ref_idx, newest_idx, rotation, translation
+
+    def _triangulate_available(self, tracks, poses, previous, max_error):
+        updated = {}
+        for feature_id, observations in tracks.items():
+            posed = [(frame_idx, uv) for frame_idx, uv in observations if poses[frame_idx] is not None]
+            if len(posed) < 2:
+                continue
+            point = self.triangulate_track(posed, poses, max_error)
+            if point is not None:
+                updated[feature_id] = point
+            elif feature_id in previous:
+                updated[feature_id] = previous[feature_id]
+        return updated
+
+    def triangulate_track(self, observations, poses, max_error):
+        """在已有位姿的观测里选基线视差较好的一对，三角化到世界系。"""
+        best_point = None
+        best_score = -1.0
+        for index_a in range(len(observations)):
+            frame_a, uv_a = observations[index_a]
+            for index_b in range(index_a + 1, len(observations)):
+                frame_b, uv_b = observations[index_b]
+                pose_a = poses[frame_a]
+                pose_b = poses[frame_b]
+                baseline = np.linalg.norm(pose_a[:3, 3] - pose_b[:3, 3])
+                if baseline < 1e-4:
+                    continue
+                relative_rotation = pose_a[:3, :3].T @ pose_b[:3, :3]
+                cosine = np.clip((np.trace(relative_rotation) - 1.0) / 2.0, -1.0, 1.0)
+                angle = np.arccos(cosine)
+                if angle > np.deg2rad(90.0):
+                    continue
+                point = self._triangulate_one(pose_a, uv_a, pose_b, uv_b)
+                if point is None:
+                    continue
+                error_a = self._reprojection_error(point, pose_a, uv_a)
+                error_b = self._reprojection_error(point, pose_b, uv_b)
+                if max(error_a, error_b) > max_error:
+                    continue
+                score = float(np.linalg.norm(uv_a - uv_b) * baseline)
+                if angle > np.deg2rad(45.0):
+                    score *= 0.25
+                if score > best_score:
+                    best_score = score
+                    best_point = point
+        return best_point
+
+    def _triangulate_one(self, pose_w_a, uv_a, pose_w_b, uv_b):
+        pose_b_a = np.linalg.inv(pose_w_b) @ pose_w_a
+        points, _ = self.triangulate_points(
+            np.asarray(uv_a, dtype=float).reshape(1, 2),
+            np.asarray(uv_b, dtype=float).reshape(1, 2),
+            pose_b_a[:3, :3],
+            pose_b_a[:3, 3].reshape(3, 1),
+        )
+        if len(points) == 0:
+            return None
+        return pose_w_a[:3, :3] @ points[0] + pose_w_a[:3, 3]
+
+    def _reprojection_error(self, point_w, pose_w_c, uv):
+        camera_point = np.linalg.inv(pose_w_c)[:3, :] @ np.append(point_w, 1.0)
+        if camera_point[2] <= 1e-6:
+            return np.inf
+        projected = self.cam_intrinsics @ camera_point
+        projected = projected[:2] / projected[2]
+        return float(np.linalg.norm(projected - np.asarray(uv, dtype=float).reshape(2)))
+
+    def _accept_pnp(self, pose, landmarks, frame):
+        feature_map = {
+            int(feature_id): np.asarray(uv, dtype=float).reshape(2)
+            for feature_id, uv in zip(frame.get_visual_feature_ids(), frame.get_visual_features())
+        }
+        errors = []
+        for feature_id, point in landmarks.items():
+            if feature_id not in feature_map:
+                continue
+            errors.append(self._reprojection_error(
+                np.asarray(point, dtype=float).reshape(3), pose, feature_map[feature_id]))
+        finite = [error for error in errors if np.isfinite(error)]
+        return len(finite) >= 10 and float(np.median(finite)) <= 8.0
+
+    def bundle_adjust_initial_window(
+            self, frames, tracks, initial_poses, initial_landmarks, ref_idx, newest_idx, initial_baseline):
+        """优化 T_wc 和世界点。参考帧位姿与最新帧平移固定，用来消掉单目 7 自由度。"""
+        long_tracks = [
+            feature_id for feature_id, observations in tracks.items()
+            if feature_id in initial_landmarks and len(observations) >= 3
+        ]
+        if len(long_tracks) < 30:
+            long_tracks = [
+                feature_id for feature_id in initial_landmarks
+                if feature_id in tracks and len(tracks[feature_id]) >= 2
+            ]
+        if len(long_tracks) < 30:
+            print(f"【Visual BA】: Only {len(long_tracks)} tracks available.")
+            return None
+
+        calibration = gtsam.Cal3_S2(
+            self.cam_intrinsics[0, 0], self.cam_intrinsics[1, 1], self.cam_intrinsics[0, 1],
+            self.cam_intrinsics[0, 2], self.cam_intrinsics[1, 2])
+        noise = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Huber.Create(2.0),
+            gtsam.noiseModel.Isotropic.Sigma(2, 1.5))
+        body_P_sensor = gtsam.Pose3()
+        graph = gtsam.NonlinearFactorGraph()
+        values = gtsam.Values()
+        for frame_idx, pose in enumerate(initial_poses):
+            values.insert(X(frame_idx), gtsam.Pose3(pose))
+        for feature_id in long_tracks:
+            values.insert(L(feature_id), gtsam.Point3(np.asarray(initial_landmarks[feature_id], dtype=float)))
+            for frame_idx, uv in tracks[feature_id]:
+                graph.add(gtsam.GenericProjectionFactorCal3_S2(
+                    gtsam.Point2(float(uv[0]), float(uv[1])),
+                    noise, X(frame_idx), L(feature_id), calibration, body_P_sensor))
+
+        ref_pose = values.atPose3(X(ref_idx))
+        graph.add(gtsam.PriorFactorPose3(
+            X(ref_idx), ref_pose, gtsam.noiseModel.Diagonal.Sigmas(np.full(6, 1e-6))))
+        newest_translation = np.asarray(values.atPose3(X(newest_idx)).translation(), dtype=float).reshape(3)
+        graph.add(gtsam.GPSFactor(
+            X(newest_idx), gtsam.Point3(newest_translation),
+            gtsam.noiseModel.Isotropic.Sigma(3, 1e-4)))
+
+        initial_error = graph.error(values)
+        params = gtsam.LevenbergMarquardtParams()
+        params.setMaxIterations(30)
+        try:
+            result = gtsam.LevenbergMarquardtOptimizer(graph, values, params).optimize()
+        except Exception as exc:
+            print(f"【Visual BA】: optimization failed: {exc}")
+            return None
+        final_error = graph.error(result)
+        print(f"【Visual BA】: cost {initial_error:.3f} -> {final_error:.3f}")
+        if final_error > initial_error * 1.01 + 1e-6:
+            print("【Visual BA】: cost increased. Reject this visual structure.")
+            return None
+
+        poses = [result.atPose3(X(frame_idx)).matrix() for frame_idx in range(len(frames))]
+        kept_landmarks = {}
+        kept_tracks = {}
+        errors = []
+        positive_depth = 0
+        considered = 0
+        for feature_id, observations in tracks.items():
+            if feature_id in long_tracks and result.exists(L(feature_id)):
+                point = np.asarray(result.atPoint3(L(feature_id)), dtype=float).reshape(3)
+            elif feature_id in initial_landmarks:
+                point = self.triangulate_track(observations, poses, max_error=5.0)
+                if point is None:
+                    continue
+            else:
+                continue
+            considered += 1
+            depths_positive = True
+            valid_observations = []
+            for frame_idx, uv in observations:
+                camera_point = np.linalg.inv(poses[frame_idx])[:3, :] @ np.append(point, 1.0)
+                if camera_point[2] <= 1e-6:
+                    depths_positive = False
+                    continue
+                error = self._reprojection_error(point, poses[frame_idx], uv)
+                if error <= 3.0:
+                    valid_observations.append((frame_idx, uv))
+            if depths_positive and len(valid_observations) == len(observations):
+                positive_depth += 1
+            if len(valid_observations) < 2:
+                continue
+            if len(valid_observations) < len(observations):
+                point = self.triangulate_track(valid_observations, poses, max_error=3.0)
+                if point is None:
+                    continue
+            observation_errors = [
+                self._reprojection_error(point, poses[frame_idx], uv)
+                for frame_idx, uv in valid_observations
+            ]
+            if any((not np.isfinite(error)) or error > 3.0 for error in observation_errors):
+                continue
+            kept_landmarks[feature_id] = point
+            kept_tracks[feature_id] = valid_observations
+            errors.extend(observation_errors)
+
+        min_landmarks = int(self.config.get('init_min_landmarks', 50))
+        positive_ratio = positive_depth / considered if considered else 0.0
+        mean_error = float(np.mean(errors)) if errors else np.inf
+        median_error = float(np.median(errors)) if errors else np.inf
+        final_baseline = np.linalg.norm(poses[newest_idx][:3, 3] - poses[ref_idx][:3, 3])
+        print(
+            f"【Visual BA】: landmarks {len(kept_landmarks)} positive-depth {positive_ratio:.3f} "
+            f"reproj mean/median {mean_error:.3f}/{median_error:.3f} px "
+            f"baseline {initial_baseline:.4f} -> {final_baseline:.4f}"
+        )
+        if len(kept_landmarks) <= min_landmarks:
+            print(f"【Visual BA】: landmark count {len(kept_landmarks)} <= {min_landmarks}.")
+            return None
+        if positive_ratio <= 0.90 or mean_error >= 1.5 or median_error >= 1.0:
+            print("【Visual BA】: structure quality below the initialization gate.")
+            return None
+        if initial_baseline > 1e-6 and final_baseline < 0.5 * initial_baseline:
+            print("【Visual BA】: baseline collapsed.")
+            return None
+        for frame_idx, frame in enumerate(frames):
+            frame.set_global_pose(poses[frame_idx])
+        return {
+            'poses': poses,
+            'landmarks': kept_landmarks,
+            'tracks': kept_tracks,
+            'ref_idx': ref_idx,
+            'newest_idx': newest_idx,
+        }
