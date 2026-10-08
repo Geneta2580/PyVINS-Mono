@@ -56,6 +56,11 @@ class VisualProcessor:
         # IMU辅助光流预测
         self.use_imu_flow_prediction = self.config.get('use_imu_flow_prediction', True)
 
+        # 灰度图增强：CLAHE 后再做高斯平滑
+        self.clahe_clip_limit = float(self.config.get('clahe_clip_limit', 3.0))
+        self.gaussian_kernel_size = int(self.config.get('gaussian_kernel_size', 3))
+        self.clahe = cv2.createCLAHE(clipLimit=self.clahe_clip_limit, tileGridSize=(8, 8))
+
     # 提取特征点
     def detect_features(self, gray_image, max_corners, mask=None):
         return cv2.goodFeaturesToTrack(
@@ -129,7 +134,13 @@ class VisualProcessor:
 
     # 光流追踪特征点
     def track_features(self, image, timestamp, predicted_pts=None, imu_data_for_prediction=None, imu_processor=None):
-        curr_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # 图像预处理
+        curr_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) # 灰度图像
+        curr_gray = self.clahe.apply(curr_gray) # 灰度图直方图均衡化增强
+        kernel_size = self.gaussian_kernel_size
+        curr_gray = cv2.GaussianBlur(curr_gray, (kernel_size, kernel_size), 0)
+        
         # 一些局部变量的初始化
         is_kf = False
         is_stationary = False
@@ -188,6 +199,7 @@ class VisualProcessor:
                 "good_prev": self.prev_pts,
                 "good_curr": self.prev_pts,
                 "good_ids": self.prev_pt_ids,
+                "processed_gray": curr_gray,
             }
 
             # 可视化第一帧（不再在这里调用，由FeatureTracker调用）
@@ -407,6 +419,7 @@ class VisualProcessor:
             "good_prev": good_prev,
             "good_curr": good_curr,
             "good_ids": good_ids,
+            "processed_gray": curr_gray,
         }
 
         return undistorted_final_pts, final_ids, stats, viz_payload
@@ -422,37 +435,27 @@ class VisualProcessor:
         
         return (b, g, r)  # BGR格式
     
-    def visualize_tracking(self, image, good_prev, good_curr, good_ids, is_kf, is_stationary, mean_parallax, timestamp, prev_total_count=0, long_track_ratio=0.0):
+    def _draw_feature_tracks(self, vis_img, good_prev, good_curr, good_ids):
+        for p1, p2, feature_id in zip(good_prev, good_curr, good_ids):
+            p1_t = tuple(p1.ravel().astype(int))
+            p2_t = tuple(p2.ravel().astype(int))
+            age = self.feature_ages.get(feature_id, 0)
+            color = self.get_age_color(age)
+            cv2.arrowedLine(vis_img, p1_t, p2_t, color=[0, 255, 0], thickness=2, tipLength=0.3)
+            cv2.circle(vis_img, p2_t, 4, color, -1)
+            cv2.putText(vis_img, f"{feature_id}", (p2_t[0] + 5, p2_t[1] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+
+    def visualize_tracking(self, image, good_prev, good_curr, good_ids, is_kf, is_stationary, mean_parallax, timestamp, prev_total_count=0, long_track_ratio=0.0, processed_gray=None):
         """
-        可视化特征点追踪结果
+        可视化特征点追踪结果。左侧是原始彩色图，右侧是预处理后的跟踪图。
         
         Returns:
             vis_img: 可视化后的图像（numpy数组）
         """
         vis_img = image.copy()
-        
-        # 绘制每个特征点的轨迹和信息
-        for p1, p2, feature_id in zip(good_prev, good_curr, good_ids):
-            p1_t = tuple(p1.ravel().astype(int))
-            p2_t = tuple(p2.ravel().astype(int))
-            
-            # 获取该特征点的年龄
-            age = self.feature_ages.get(feature_id, 0)
-            
-            # 根据年龄获取渐变颜色
-            color = self.get_age_color(age)
-            
-            # 画出光流轨迹（使用渐变颜色）
-            cv2.arrowedLine(vis_img, p1_t, p2_t, color=[0, 255, 0], thickness=2, tipLength=0.3)
-            
-            # 画出特征点（使用相同的渐变颜色）
-            cv2.circle(vis_img, p2_t, 4, color, -1)
-            
-            # 画出特征点的ID和年龄（白底黑字，更清晰）
-            label = f"{feature_id}"
-            cv2.putText(vis_img, label, (p2_t[0]+5, p2_t[1]-5), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
-        
+        self._draw_feature_tracks(vis_img, good_prev, good_curr, good_ids)
+
         # 显示统计信息（不再写入日志，日志由FeatureTracker负责）
         if len(good_ids) > 0:
             # 计算追踪成功率
@@ -466,8 +469,15 @@ class VisualProcessor:
         else:
             info_text1 = f"Features: 0 | KF: {is_kf}"
 
-        cv2.putText(vis_img, info_text1, (10, 30), 
+        cv2.putText(vis_img, info_text1, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        if processed_gray is not None:
+            processed_bgr = cv2.cvtColor(processed_gray, cv2.COLOR_GRAY2BGR)
+            self._draw_feature_tracks(processed_bgr, good_prev, good_curr, good_ids)
+            cv2.putText(processed_bgr, "preprocessed", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            vis_img = np.hstack([vis_img, processed_bgr])
         
         # 显示图像
         cv2.imshow("Optical Flow", vis_img)

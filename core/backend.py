@@ -11,7 +11,7 @@ class Backend:
         self.config = config
 
         # 滑窗数据结构
-        self.lag_window_size = config.get('lag_window_size', 9) # 优化器的滑窗
+        self.window_size = config.get('window_size', 10)
         self.active_values = gtsam.Values()
         self.active_frame_gtsam_ids = []
         self.marg_factor = None

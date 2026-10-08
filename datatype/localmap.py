@@ -14,7 +14,6 @@ class LocalMap:
         T_bc_raw = self.config.get('T_bc', np.eye(4).flatten().tolist())
         self.T_bc = np.asarray(T_bc_raw).reshape(4, 4)
 
-        self.max_frames = self.config.get('window_size', 10)
         self.max_depth = self.config.get('max_depth', 400)
         self.min_depth = self.config.get('min_depth', 0.4)
         self.triangulation_max_reprojection_error = self.config.get('triangulation_max_reprojection_error', 60.0)
@@ -31,21 +30,13 @@ class LocalMap:
     def add_frame(self, frame):
         self.frames[frame.get_id()] = frame
 
-        suspect_lm_id = 7747 # <--- 设置我们要追踪的目标
-
         # 更新Landmark的观测信息，或创建新的Landmark，创建后默认为CANDIDATE
-        # DEBUG
         for lm_id, pt_2d in zip(frame.get_visual_feature_ids(), frame.get_visual_features()):
             if lm_id in self.landmarks:
                 self.landmarks[lm_id].add_observation(frame.get_id(), pt_2d)
-                if lm_id == suspect_lm_id:
-                    print(f"🕵️‍ [Trace l{suspect_lm_id}]: OBSERVED by new frame {frame.get_id()}. Total observations: {self.landmarks[lm_id].get_observation_count()}")
             else:
                 new_lm = Landmark(lm_id, frame.get_id(), pt_2d)
                 self.landmarks[lm_id] = new_lm
-                if lm_id == suspect_lm_id:
-                    print(f"🕵️‍ [Trace l{suspect_lm_id}]: --- BORN! First seen in frame {frame.get_id()} ---")
-        # DEBUG
 
     def remove_frame(self, frame_id, transfer_host=False):
         """删除指定帧及其观测。普通帧边缘化时把 host 转到剩余最早观测，不改世界坐标。"""

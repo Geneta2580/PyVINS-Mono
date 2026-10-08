@@ -2,7 +2,6 @@ import numpy as np
 import threading
 from collections import deque
 from enum import Enum, auto
-import queue
 
 from utils.dataloader import ImuMeasurement
 from core.visual_process import VisualProcessor
@@ -19,6 +18,10 @@ class FeatureTracker(threading.Thread):
         self.imu_processor = imu_processor
         self.use_imu_flow_prediction = self.config.get('use_imu_flow_prediction', True)
         self.imu_buffer = deque()
+        self.pending_imu = []
+        self.held_visual = None
+        self.sent_imu_count = 0
+        self._shutdown_sent = False
         self.last_image_timestamp = None
         self.last_kf_timestamp = None
 
@@ -64,38 +67,80 @@ class FeatureTracker(threading.Thread):
         self._close_logger()
         print("Visual Feature Tracker shut down signal sent.")
 
+    def _put_lossless(self, packet):
+        """阻塞直到入队。队列不丢 IMU、图像和结束信号。"""
+        self.output_queue.put(packet)
+
+    def _buffer_imu_for_flow(self, timestamp, measurement):
+        if not self.use_imu_flow_prediction:
+            return
+        self.imu_buffer.append((timestamp, measurement))
+        max_buffer_time = 1.0
+        while len(self.imu_buffer) > 0 and timestamp - self.imu_buffer[0][0] > max_buffer_time:
+            self.imu_buffer.popleft()
+
+    def _stage_imu(self, timestamp, measurement):
+        """先攒着，等这张图像的右端点 IMU 到齐后随图像一次送出。"""
+        self.pending_imu.append((timestamp, measurement))
+        self._release_held_visual()
+
+    def _stage_visual(self, visual_features):
+        """先挂起这张图像。右端点 IMU 已经在缓冲里就立刻送出。"""
+        if self.held_visual is not None:
+            raise RuntimeError(
+                "previous image is still waiting for an IMU sample at or after its timestamp"
+            )
+        self.held_visual = visual_features
+        self._release_held_visual()
+
+    def _release_held_visual(self):
+        """最新 IMU 不早于图像时刻时，连同这段 IMU 一次送出。"""
+        if self.held_visual is None or not self.pending_imu:
+            return
+        image_timestamp = self.held_visual['timestamp']
+        if self.pending_imu[-1][0] + 1e-9 < image_timestamp:
+            return
+        imu_batch = self.pending_imu
+        self.pending_imu = []
+        packet = self.held_visual
+        packet['imu_since_last_image'] = imu_batch
+        self.held_visual = None
+        self._put_lossless(packet)
+        self.sent_imu_count += len(imu_batch)
+
+    def _finish_stream(self):
+        if self._shutdown_sent:
+            return
+        if self.held_visual is not None:
+            image_timestamp = self.held_visual['timestamp']
+            raise RuntimeError(
+                f"image at {image_timestamp:.9f} has no IMU sample at or after its timestamp"
+            )
+        if self.pending_imu:
+            self._put_lossless({'imu_since_last_image': self.pending_imu})
+            self.sent_imu_count += len(self.pending_imu)
+            self.pending_imu = []
+        self._put_lossless(None)
+        self._shutdown_sent = True
+
     def run(self):
         print("Visual Feature Tracker thread started.")
-        for i, (timestamp, event_type, data) in enumerate(self.dataloader):
+        try:
+            for i, (timestamp, event_type, data) in enumerate(self.dataloader):
 
-            # 如果frontend被关闭，则退出循环
-            if not self.is_running:
-                break
+                if not self.is_running:
+                    break
 
-            # 处理IMU数据
-            if event_type == 'IMU':
-                # 注意角速度在前，加速度在后
-                data = ImuMeasurement(gyro = data[0:3], accel = data[3:6])
+                if event_type == 'IMU':
+                    measurement = ImuMeasurement(gyro=data[0:3], accel=data[3:6])
+                    self._buffer_imu_for_flow(timestamp, measurement)
+                    self._stage_imu(timestamp, measurement)
+                    continue
 
-                if data:
-                    imu_measurements = {
-                        'imu_measurements': data,
-                        'timestamp': timestamp,
-                    }
-                    # 存储IMU数据到缓冲区，用于光流初值预测
-                    if self.use_imu_flow_prediction:
-                        self.imu_buffer.append((timestamp, data))
-                        # 保持缓冲区大小，只保留最近的IMU数据（例如最近1秒的数据）
-                        max_buffer_time = 1.0  # 秒
-                        while len(self.imu_buffer) > 0 and timestamp - self.imu_buffer[0][0] > max_buffer_time:
-                            self.imu_buffer.popleft()
-                try:
-                    self.output_queue.put(imu_measurements, timeout=0.1)
-                except queue.Full:
-                    pass
+                if event_type != 'IMAGE':
+                    continue
 
-            # 处理图像数据
-            elif event_type == 'IMAGE':
+                # 处理图像数据
                 # data[0]是图像数据，data[1]是图像路径      
                 image_data = data[0]
                 print(f"【FeatureTracker】Image data: {data[1]}")
@@ -157,7 +202,8 @@ class FeatureTracker(threading.Thread):
                         stats["mean_parallax"],
                         timestamp,
                         stats["prev_total_count"],
-                        stats["long_track_ratio"]
+                        stats["long_track_ratio"],
+                        viz.get("processed_gray"),
                     )
 
                 if self.enable_fps_stats:
@@ -201,21 +247,21 @@ class FeatureTracker(threading.Thread):
                     'vis_img': vis_img,  # visualize_tracking的返回值
                 }
 
-                try:
-                    self.output_queue.put(visual_features, timeout=0.1) 
-                except queue.Full:
-                    pass
+                self._stage_visual(visual_features)
 
                 if is_kf_final:
                     self.last_kf_timestamp = timestamp
                     print(f"【FeatureTracker】Keyframe: {visual_features['timestamp']}")
-        
-        # 从数据循环中跳出，表示程序需要结束
-        try:
-            self.output_queue.put(None, timeout=0.1) 
-        except queue.Full:
-            pass
-        self.is_running = False
-        self._report_fps_summary()
-        self._close_logger()
-        print("Visual Feature Tracker has finished processing all data.")
+        finally:
+            try:
+                self._finish_stream()
+            except Exception as exc:
+                print(f"【IMU Queue】ERROR: {exc}")
+                if not self._shutdown_sent:
+                    self._put_lossless(None)
+                    self._shutdown_sent = True
+            self.is_running = False
+            self._report_fps_summary()
+            self._close_logger()
+            print(f"【IMU Queue】sent {self.sent_imu_count}")
+            print("Visual Feature Tracker has finished processing all data.")

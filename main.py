@@ -1,5 +1,6 @@
 import os
 import argparse
+import sys
 import yaml
 from pathlib import Path
 import queue
@@ -43,8 +44,8 @@ def main():
     global_central_map = GlobalMap()
     imu_processor = IMUProcessor(config)
 
-    # 创建队列
-    feature_tracker_to_estimator_queue = queue.Queue(maxsize=20)
+    # 前后端队列不限长度。离线 IMU 是 200 Hz，有限队列满了会丢样本。
+    feature_tracker_to_estimator_queue = queue.Queue(maxsize=0)
     estimator_to_viewer_queue = queue.Queue(maxsize=20)
 
     # 初始化数据加载器
@@ -87,6 +88,13 @@ def main():
 
         cv2.destroyAllWindows()
         print("[Main Process] SLAM system shut down.")
+
+        sent_imu = feature_tracker.sent_imu_count
+        received_imu = estimator.received_imu_count
+        print(f"【IMU Queue】sent {sent_imu} received {received_imu}")
+        if sent_imu != received_imu:
+            print("【IMU Queue】ERROR: sent IMU count does not match received IMU count.")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

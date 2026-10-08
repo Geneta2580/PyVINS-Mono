@@ -34,6 +34,7 @@ class Estimator(threading.Thread):
         # IMU相关
         self.imu_processor = imu_processor
         self.imu_buffer = []
+        self.received_imu_count = 0
         self.cached_imu_edges = {}  # {(id1, id2): {pim, measurements, timestamps, bias_hat}}
         self.scheduled_frames = []  # 等到 IMU 覆盖该帧时间后再进入初始化或跟踪
 
@@ -107,15 +108,15 @@ class Estimator(threading.Thread):
 
                 if package is None:
                     print("【Estimator】received shutdown signal from frontend.")
-                    break 
+                    print(f"【IMU Queue】received {self.received_imu_count}")
+                    break
 
-                # 接收IMU数据
-                if 'imu_measurements' in package:
-                    self.imu_buffer.append(package)
-                    self._drain_scheduled_frames()
+                imu_batch = package.get('imu_since_last_image')
+                if imu_batch:
+                    self._ingest_imu_batch(imu_batch)
 
                 # 接收视觉特征点数据
-                elif 'visual_features' in package:
+                if 'visual_features' in package:
                     timestamp = package['timestamp']
                     visual_features = package['visual_features']
                     feature_ids = package['feature_ids']
@@ -151,19 +152,24 @@ class Estimator(threading.Thread):
                     self.next_f_id += 1
                     self._schedule_frame(new_frame, is_stationary, is_keyframe)
 
-                # 若最新IMU数据更新
-                # TODO：目前未加入重积分机制，精度会有损失
-                if self.use_imu_output and len(self.imu_buffer) >= 2:
-                    latest_imu_timestamp = self.imu_buffer[-1]['timestamp']
-                    if latest_imu_timestamp > self.last_processed_imu_timestamp:
-                        self.process_imu_data(latest_imu_timestamp)
-                        self.last_processed_imu_timestamp = latest_imu_timestamp
-
-
             except queue.Empty:
                 continue
         
         print("【Estimator】thread has finished.")
+
+    def _ingest_imu_batch(self, imu_batch):
+        """图像包里的 IMU 按时间顺序写入。丢样本会在结束时和发送计数对不上。"""
+        for timestamp, measurement in imu_batch:
+            self.imu_buffer.append({
+                'imu_measurements': measurement,
+                'timestamp': timestamp,
+            })
+            self.received_imu_count += 1
+            if self.use_imu_output and len(self.imu_buffer) >= 2:
+                if timestamp > self.last_processed_imu_timestamp:
+                    self.process_imu_data(timestamp)
+                    self.last_processed_imu_timestamp = timestamp
+        self._drain_scheduled_frames()
 
     def _schedule_frame(self, frame, is_stationary, is_keyframe):
         """图像时刻若还没有 IMU，就先挂起。EuRoC 常有一条与图像时间相同的 IMU，它可能排在图像之后。"""
