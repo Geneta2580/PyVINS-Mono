@@ -39,7 +39,7 @@ class LocalMap:
     def remove_frame(self, frame_id, transfer_host=False):
         """删除指定帧及其观测。host 帧离开时把标签转到剩余最早观测，不改世界坐标，也不新建 Point3。"""
         if frame_id not in self.frames:
-            return []
+            return {}
 
         print(f"【LocalMap】: Removing frame {frame_id}, transfer_host={transfer_host}.")
         del self.frames[frame_id]
@@ -55,14 +55,30 @@ class LocalMap:
             else:
                 empty_host_ids.append(landmark.id)
 
+        removed_positions = {}
         for lm_id in empty_host_ids:
-            self.landmarks.pop(lm_id, None)
+            position = self._pop_landmark_position(lm_id)
+            if position is not None:
+                removed_positions[lm_id] = position
 
-        stale_lm_ids = self.prune_stale_landmarks()
-        removed_ids = list(empty_host_ids)
-        if stale_lm_ids:
-            removed_ids.extend(stale_lm_ids)
-        return removed_ids
+        for lm_id, position in self.prune_stale_landmarks().items():
+            removed_positions.setdefault(lm_id, position)
+        return removed_positions
+
+    def landmark_positions(self, landmark_ids):
+        positions = {}
+        for lm_id in landmark_ids:
+            landmark = self.landmarks.get(lm_id)
+            if landmark is None or landmark.position_3d is None:
+                continue
+            positions[lm_id] = np.asarray(landmark.position_3d, dtype=float).reshape(3).copy()
+        return positions
+
+    def _pop_landmark_position(self, lm_id):
+        landmark = self.landmarks.pop(lm_id, None)
+        if landmark is None or landmark.position_3d is None:
+            return None
+        return np.asarray(landmark.position_3d, dtype=float).reshape(3).copy()
 
     def prune_stale_landmarks(self):
         active_landmark_ids = set()
@@ -70,16 +86,15 @@ class LocalMap:
             active_landmark_ids.update(frame.get_visual_feature_ids())
 
         stale_ids = [lm_id for lm_id in self.landmarks if lm_id not in active_landmark_ids]
-        
+        removed_positions = {}
         if stale_ids:
             print(f"【LocalMap】: Pruning {len(stale_ids)} stale landmarks.")
             print(f"【LocalMap】: Stale landmarks: {stale_ids}")
             for lm_id in stale_ids:
-                del self.landmarks[lm_id]
-            
-            return stale_ids
-        
-        return None
+                position = self._pop_landmark_position(lm_id)
+                if position is not None:
+                    removed_positions[lm_id] = position
+        return removed_positions
 
     def get_active_frames(self):
         # 按 ID 排序返回当前窗口中的全部帧

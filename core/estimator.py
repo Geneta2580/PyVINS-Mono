@@ -8,7 +8,6 @@ from gtsam.symbol_shorthand import X, V, B
 
 from .backend import Backend
 from datatype.frame import Frame
-from datatype.global_map import GlobalMap
 from datatype.localmap import LocalMap
 from datatype.landmark import Landmark, LandmarkStatus
 from .imu_process import IMUProcessor
@@ -29,6 +28,7 @@ class Estimator(threading.Thread):
         super().__init__(daemon=True)
         self.config = config
         self.input_queue = input_queue
+        self.global_map = global_central_map
         self.local_map = LocalMap(config)
 
         # IMU相关
@@ -313,9 +313,14 @@ class Estimator(threading.Thread):
             f"kept {kept} landmarks, removed {len(landmark_ids)} landmarks."
         )
         self._drop_imu_cache_for_frame(frame_id)
-        self.local_map.remove_frame(frame_id, transfer_host=True)
+        frame = self.local_map.frames.get(frame_id)
+        archived_landmarks = self.local_map.landmark_positions(landmark_ids)
+        archived_landmarks.update(self.local_map.remove_frame(frame_id, transfer_host=True))
         for lm_id in landmark_ids:
             self.local_map.landmarks.pop(lm_id, None)
+        if frame is not None:
+            self.global_map.add_frame(frame_id, frame.get_global_pose())
+        self.global_map.add_landmarks(archived_landmarks)
         self._assert_window_consistency()
 
     def _commit_margin_second_new(self, frame_a, frame_b, frame_c, edge_ac):
@@ -659,29 +664,7 @@ class Estimator(threading.Thread):
                 self.trajectory_file.flush() # 确保数据立即写入磁盘
             # 记录初始优化轨迹
             
-            #  viewer可视化
-            if self.viewer_queue:
-                print("【Init】: Sending initialization result to viewer queue...")
-
-                # 从 local_map 中获取最新的、优化后的位姿和路标点数据
-                active_frames = self.local_map.get_active_frames()
-                poses = {frame.get_id(): frame.get_global_pose() for frame in active_frames if frame.get_global_pose() is not None}
-                
-                # 调用 LocalMap 的辅助函数来获取纯粹的位置字典
-                landmarks_positions = self.local_map.get_active_landmarks()
-
-                vis_data = {
-                    'landmarks': landmarks_positions,
-                    'poses': poses
-                }
-                
-                # 打印一些信息以供调试
-                print(f"【Viewer】: Sending {len(poses)} poses and {len(landmarks_positions)} landmarks to viewer.")
-
-                try:
-                    self.viewer_queue.put_nowait(vis_data)
-                except queue.Full:
-                    print("【Estimator】: Viewer queue is full, skipping visualization data.")
+            self._publish_viewer_state("Init")
             # viewer可视化
             
         else:
@@ -953,29 +936,31 @@ class Estimator(threading.Thread):
             self.trajectory_file.flush() # 确保数据立即写入磁盘
         # 记录优化轨迹
         
-        # viewer可视化
-        if self.viewer_queue:
-            print("【Tracking】: Sending tracking result to viewer queue...")
+        self._publish_viewer_state("Tracking")
 
-            # 从 local_map 中获取最新的、优化后的位姿和路标点数据
-            active_frames = self.local_map.get_active_frames()
-            poses = {frame.get_id(): frame.get_global_pose() for frame in active_frames if frame.get_global_pose() is not None}
-            
-            # 【核心修正】调用 LocalMap 的辅助函数来获取纯粹的位置字典
-            landmarks_positions = self.local_map.get_active_landmarks()
-
-            vis_data = {
-                'landmarks': landmarks_positions,
-                'poses': poses
-            }
-            
-            # 打印一些信息以供调试
-            print(f"【Viewer】: Sending {len(poses)} poses and {len(landmarks_positions)} landmarks to viewer.")
-
-            try:
-                self.viewer_queue.put_nowait(vis_data)
-            except queue.Full:
-                print("【Estimator】: Viewer queue is full, skipping visualization data.")
+    def _publish_viewer_state(self, stage):
+        if not self.viewer_queue:
+            return
+        active_frames = self.local_map.get_active_frames()
+        poses = {
+            frame.get_id(): frame.get_global_pose()
+            for frame in active_frames if frame.get_global_pose() is not None
+        }
+        landmarks = self.local_map.get_active_landmarks()
+        global_poses, global_landmarks = self.global_map.snapshot()
+        print(
+            f"【Viewer】: {stage} local {len(poses)} poses / {len(landmarks)} landmarks, "
+            f"global {len(global_poses)} poses / {len(global_landmarks)} landmarks."
+        )
+        try:
+            self.viewer_queue.put_nowait({
+                'poses': poses,
+                'landmarks': landmarks,
+                'global_poses': global_poses,
+                'global_landmarks': global_landmarks,
+            })
+        except queue.Full:
+            print("【Estimator】: Viewer queue is full, skipping visualization data.")
 
     def process_imu_data(self, latest_imu_timestamp):
         # 检查 latest_nav_state 是否已初始化
