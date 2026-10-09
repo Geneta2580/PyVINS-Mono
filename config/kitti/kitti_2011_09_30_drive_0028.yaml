@@ -22,7 +22,7 @@ initial_parallax: 40
 initial_sfm_reprojection_threshold: 2.0
 
 # 选择关键帧最小视差 10
-min_parallax: 15
+keyframe_parallax: 15
 
 # 静止视差
 min_stationary_parallax: 3.0

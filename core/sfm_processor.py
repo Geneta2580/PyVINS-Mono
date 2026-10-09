@@ -6,6 +6,7 @@ from gtsam.symbol_shorthand import L, X
 class SfMProcessor:
     def __init__(self, config, cam_intrinsics):
         self.reprojection_threshold = config.get('initial_sfm_reprojection_threshold', 3.0)
+        self.initial_min_matches = int(config.get('initial_min_matches', 20))
         self.cam_intrinsics = cam_intrinsics
         self.config = config
         self.keyframes = {}
@@ -26,7 +27,7 @@ class SfMProcessor:
 
     def epipolar_compute(self, kf1, kf2):
         pts1, pts2, common_ids = self.find_matches_features(kf1, kf2)
-        if len(common_ids) < 30:
+        if len(common_ids) < self.initial_min_matches:
             print("【VO】: Not enough matches to initialize")
             return False, None, None, None, None, None
 
@@ -40,7 +41,7 @@ class SfMProcessor:
 
         # 计算基础矩阵
         num_inliers, R, t, final_inlier_mask = cv2.recoverPose(E, pts1, pts2, self.cam_intrinsics, inlier_mask)
-        if num_inliers < 30:
+        if num_inliers < self.initial_min_matches:
             print("【VO】: Failed to recover pose")
             return False, None, None, None, None, None
 
@@ -168,11 +169,11 @@ class SfMProcessor:
             tracks[feature_id] = sorted(observations.items())
         return tracks
 
-    def initialize_window(self, frames, min_parallax):
+    def initialize_window(self, frames, parallax_threshold):
         """参考帧对最新帧做相对位姿，再交替 PnP / 三角化，最后做固定尺度的视觉 BA。"""
         if len(frames) < 2:
             return None
-        parallax_threshold = float(min_parallax)
+        parallax_threshold = float(parallax_threshold)
         # 构建特征匹配对
         tracks = self.build_feature_tracks(frames) 
         # 选择参考帧（视差最大，匹配点数最多），作为初始化窗口的参考帧，同时返回参考帧的位姿和最新帧的E阵分解的旋转和平移
@@ -227,7 +228,7 @@ class SfMProcessor:
         return self.bundle_adjust_initial_window(
             frames, tracks, poses, landmarks, ref_idx, newest_idx, initial_baseline)
 
-    def _select_reference_pair(self, frames, min_parallax):
+    def _select_reference_pair(self, frames, parallax_threshold):
         # 选择最新帧作为参考帧
         newest_idx = len(frames) - 1
         best = None
@@ -243,8 +244,9 @@ class SfMProcessor:
                 f"  - Pair (KF {frames[ref_idx].get_id()}, newest {frames[newest_idx].get_id()}) "
                 f"parallax {parallax:.2f} px, matches {len(inlier_ids)}"
             )
-            # 过滤视差小于阈值或匹配点数小于30的帧
-            if parallax < min_parallax or len(inlier_ids) < 30:
+            # VINS-Mono initialStructure(): >20 correspondences and about
+            # 30 px average parallax on EuRoC before solving relative pose.
+            if parallax < parallax_threshold or len(inlier_ids) < self.initial_min_matches:
                 continue
             score = (parallax, len(inlier_ids))
             # 选择最佳帧
@@ -273,38 +275,57 @@ class SfMProcessor:
                 updated[feature_id] = previous[feature_id]
         return updated
 
-    def triangulate_track(self, observations, poses, max_error):
-        """在已有位姿的观测里选基线视差较好的一对，三角化到世界系。"""
-        best_point = None
-        best_score = -1.0
-        for index_a in range(len(observations)):
-            frame_a, uv_a = observations[index_a]
-            for index_b in range(index_a + 1, len(observations)):
-                frame_b, uv_b = observations[index_b]
-                pose_a = poses[frame_a]
-                pose_b = poses[frame_b]
-                baseline = np.linalg.norm(pose_a[:3, 3] - pose_b[:3, 3])
-                if baseline < 1e-4:
-                    continue
-                relative_rotation = pose_a[:3, :3].T @ pose_b[:3, :3]
-                cosine = np.clip((np.trace(relative_rotation) - 1.0) / 2.0, -1.0, 1.0)
-                angle = np.arccos(cosine)
-                if angle > np.deg2rad(90.0):
-                    continue
-                point = self._triangulate_one(pose_a, uv_a, pose_b, uv_b)
-                if point is None:
-                    continue
-                error_a = self._reprojection_error(point, pose_a, uv_a)
-                error_b = self._reprojection_error(point, pose_b, uv_b)
-                if max(error_a, error_b) > max_error:
-                    continue
-                score = float(np.linalg.norm(uv_a - uv_b) * baseline)
-                if angle > np.deg2rad(45.0):
-                    score *= 0.25
-                if score > best_score:
-                    best_score = score
-                    best_point = point
-        return best_point
+    def triangulate_track(self, observations, poses, max_error,
+                          min_depth=None, max_depth=None, min_parallax_angle_deg=None):
+        """利用多观测帧的位姿和像素坐标计算世界点。深度区间和视差角只在调用方传入时生效。"""
+        rows = []
+        valid = []
+        for frame_idx, uv in observations:
+            pose_w_c = poses[frame_idx]
+            if pose_w_c is None:
+                continue
+            projection = self.cam_intrinsics @ np.linalg.inv(pose_w_c)[:3, :]
+            u, v = np.asarray(uv, dtype=float).reshape(2)
+            rows.append(u * projection[2] - projection[0])
+            rows.append(v * projection[2] - projection[1])
+            valid.append((frame_idx, np.asarray(uv, dtype=float).reshape(2)))
+        if len(valid) < 2:
+            return None
+
+        # 使用SVD分解计算最小二乘解并计算重投影误差
+        _, _, vt = np.linalg.svd(np.asarray(rows, dtype=float), full_matrices=False)
+        homogeneous = vt[-1]
+        if abs(homogeneous[3]) < 1e-9:
+            return None
+        point = homogeneous[:3] / homogeneous[3]
+        camera_positions = []
+        for frame_idx, uv in valid:
+            pose = poses[frame_idx]
+            camera_point = np.linalg.inv(pose)[:3, :] @ np.append(point, 1.0)
+            depth = float(camera_point[2])
+            if depth <= 1e-6:
+                return None
+            if min_depth is not None and depth <= float(min_depth):
+                return None
+            if max_depth is not None and depth > float(max_depth):
+                return None
+            if self._reprojection_error(point, pose, uv) > max_error:
+                return None
+            camera_positions.append(np.asarray(pose[:3, 3], dtype=float).reshape(3))
+        if min_parallax_angle_deg is not None and not self._parallax_sufficient(
+                point, camera_positions, min_parallax_angle_deg):
+            return None
+        return point
+
+    def _parallax_sufficient(self, point, camera_positions, min_parallax_angle_deg):
+        if len(camera_positions) < 3:
+            return False
+        positions = np.asarray(camera_positions, dtype=float)
+        baseline = np.linalg.norm(np.ptp(positions, axis=0))
+        center_depth = np.linalg.norm(point - np.mean(positions, axis=0))
+        if center_depth < 1e-6:
+            return False
+        return baseline / center_depth >= np.deg2rad(float(min_parallax_angle_deg))
 
     def _triangulate_one(self, pose_w_a, uv_a, pose_w_b, uv_b):
         pose_b_a = np.linalg.inv(pose_w_b) @ pose_w_a

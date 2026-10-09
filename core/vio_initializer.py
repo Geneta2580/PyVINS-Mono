@@ -173,9 +173,13 @@ class VIOInitializer:
         # Debugger.visualize_matrix(H, title="Hessian Matrix", save_path="hessian_matrix.png")
         # Debugger.save_full_matrix_python(H)
         
+        condition_number = float(np.linalg.cond(H))
         H = H * 1000.0
         b = b * 1000.0
-        x = np.matmul(np.linalg.inv(H), b)
+        try:
+            x = np.linalg.solve(H, b)
+        except np.linalg.LinAlgError:
+            return None, None, None, condition_number
 
         scale = x[dim-1] / 100.0 # 这里就补偿了前面的100
         gravity = x[-4:-1]
@@ -183,7 +187,7 @@ class VIOInitializer:
 
         # print(f"【System Init】: scale: {scale}")
         # print(f"【System Init】: result: {np.linalg.norm(gravity)} gravity: {gravity}")
-        return scale, gravity, velocities
+        return scale, gravity, velocities, condition_number
 
     @staticmethod
     def refine_gravity(keyframes, imu_factors, gravity, gravity_magnitude, T_bc):
@@ -394,18 +398,34 @@ class VIOInitializer:
         repropagated_imu_factors = VIOInitializer.repropagate_imu(imu_factors, imu_processor, bg0)
         if not repropagated_imu_factors:
             print("【System Init】: Repropagation failed.")
-            return False, None, None, None, None
+            return False, None, None, None, None, None
 
-        scale, gravity, velocities = VIOInitializer.linear_alignment(keyframes, repropagated_imu_factors, gravity_magnitude, T_bc)
+        scale, gravity, velocities, condition_number = VIOInitializer.linear_alignment(
+            keyframes, repropagated_imu_factors, gravity_magnitude, T_bc)
         if scale is None or gravity is None:
             print("【System Init】: Failed to intialize scale and gravity")
-            return False, None, None, None, None
+            return False, None, None, None, None, None
 
         refine_scale, refine_gravity, refine_velocities = VIOInitializer.refine_gravity(keyframes, repropagated_imu_factors, gravity, gravity_magnitude, T_bc)
         if refine_scale is None or refine_gravity is None:
             print("【System Init】: Failed to refine scale and gravity")
-            return False, None, None, None, None
+            return False, None, None, None, None, None
 
-        gravity_w = VIOInitializer.align_to_world_frame(keyframes, refine_velocities, refine_gravity, refine_scale, T_bc)
+        delta_velocities = np.asarray([
+            np.asarray(factor['imu_preintegration'].deltaVij(), dtype=float)
+            / max(float(factor['imu_preintegration'].deltaTij()), 1e-9)
+            for factor in repropagated_imu_factors
+        ])
+        mean_delta_velocity = np.mean(delta_velocities, axis=0)
+        excitation = float(np.sqrt(np.mean(np.sum(
+            (delta_velocities - mean_delta_velocity) ** 2, axis=1))))
+        diagnostics = {
+            'span': float(keyframes[-1].get_timestamp() - keyframes[0].get_timestamp()),
+            'excitation': excitation,
+            'linear_gravity_norm': float(np.linalg.norm(gravity)),
+            'condition_number': condition_number,
+        }
 
-        return True, refine_scale, bg0, refine_velocities, gravity_w
+        # Do not mutate poses here. The estimator first validates this solution
+        # against neighboring initialization windows, then commits alignment.
+        return True, refine_scale, bg0, refine_velocities, refine_gravity, diagnostics

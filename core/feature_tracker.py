@@ -23,7 +23,8 @@ class FeatureTracker(threading.Thread):
         self.sent_imu_count = 0
         self._shutdown_sent = False
         self.last_image_timestamp = None
-        self.last_kf_timestamp = None
+        self.estimator_publish_hz = float(self.config.get('estimator_publish_hz', 10.0))
+        self.last_estimator_image_timestamp = None
 
         # Threading control
         self.is_running = False
@@ -33,8 +34,7 @@ class FeatureTracker(threading.Thread):
 
         # 日志记录（从VisualProcessor移到这里）
         log_columns = [
-            "timestamp", "feature_count", "long_track_ratio", "mean_parallax", "is_kf", "is_stationary",
-            "is_kf_visual", "is_kf_time", "is_kf_final",
+            "timestamp", "feature_count", "long_track_ratio", "mean_parallax", "is_stationary",
             "instant_fps", "avg_fps",
         ]
         self.logger = Debugger(self.config, file_prefix="feature_tracker", column_names=log_columns)
@@ -92,6 +92,24 @@ class FeatureTracker(threading.Thread):
             )
         self.held_visual = visual_features
         self._release_held_visual()
+
+    def _should_publish_to_estimator(self, timestamp):
+        """Keep tracking every image, but feed the estimator at VINS-Mono's configured rate."""
+        if self.estimator_publish_hz <= 0.0:
+            return True
+        if self.last_estimator_image_timestamp is None:
+            self.last_estimator_image_timestamp = timestamp
+            return True
+        period = 1.0 / self.estimator_publish_hz
+        # EuRoC nanosecond timestamps lose a few 1e-7 s after conversion to
+        # float seconds.  A small bounded tolerance prevents a nominal 0.1 s
+        # interval from being mistaken for 0.0999999 s and turning 10 Hz into
+        # an alternating 6.7/10 Hz stream.
+        tolerance = min(1e-4, period * 1e-3)
+        if timestamp - self.last_estimator_image_timestamp < period - tolerance:
+            return False
+        self.last_estimator_image_timestamp = timestamp
+        return True
 
     def _release_held_visual(self):
         """最新 IMU 不早于图像时刻时，连同这段 IMU 一次送出。"""
@@ -172,33 +190,14 @@ class FeatureTracker(threading.Thread):
                 # 更新上一帧图像时间戳
                 self.last_image_timestamp = timestamp
 
-                # 视觉判定（来自VisualProcessor）
-                is_kf_visual = int(stats["is_kf_visual"])
-
-                # 时间判定和最终判定
-                is_kf_time = 0
-                is_kf_final = is_kf_visual
-                if self.last_kf_timestamp is not None:
-                    dt = timestamp - self.last_kf_timestamp
-                    is_kf_time_max = int(dt > self.config.get('max_kf_interval', 5))
-                    is_kf_time_min = int(dt > self.config.get('min_kf_interval', 0.2))
-                    # 视觉条件满足且间隔大于最小关键帧间隔才能插入关键帧，或者超过最大间隔强制插入
-                    is_kf_final = int((is_kf_visual and is_kf_time_min) or is_kf_time_max)
-                    is_kf_time = int(is_kf_time_max or is_kf_time_min)
-                else:
-                    # 第一帧：视觉判定就是最终判定
-                    is_kf_final = int(is_kf_visual)
-                    is_kf_time = 0
-
                 is_stationary = int(stats["is_stationary"])
 
-                # 可视化：使用最终is_kf_final，并接收返回的vis_img
                 vis_img = None
                 if self.visual_processor.visualize_flag:
                     vis_img = self.visual_processor.visualize_tracking(
                         image_data,
                         viz["good_prev"], viz["good_curr"], viz["good_ids"],
-                        is_kf_final, is_stationary,
+                        is_stationary,
                         stats["mean_parallax"],
                         timestamp,
                         stats["prev_total_count"],
@@ -220,18 +219,12 @@ class FeatureTracker(threading.Thread):
                     instant_fps = 0.0
                     avg_fps = 0.0
 
-                # 写入日志：保留原有字段（is_kf保持视觉判定语义），新增3个is_kf字段
                 self.logger.log_state({
                     "timestamp": float(stats["timestamp"]),
                     "feature_count": int(stats["feature_count"]),
                     "long_track_ratio": float(stats["long_track_ratio"]),
                     "mean_parallax": float(stats["mean_parallax"]),
-                    "is_kf": int(is_kf_visual),              # 保持原"视觉is_kf"的语义
                     "is_stationary": int(is_stationary),
-
-                    "is_kf_visual": int(is_kf_visual),
-                    "is_kf_time": int(is_kf_time),
-                    "is_kf_final": int(is_kf_final),
                     "instant_fps": float(instant_fps),
                     "avg_fps": float(avg_fps),
                 })
@@ -242,16 +235,12 @@ class FeatureTracker(threading.Thread):
                     'feature_ids': feature_ids,
                     'timestamp': timestamp,
                     'image': image_data,
-                    'is_kf': is_kf_final,
                     'is_stationary': is_stationary,
                     'vis_img': vis_img,  # visualize_tracking的返回值
                 }
 
-                self._stage_visual(visual_features)
-
-                if is_kf_final:
-                    self.last_kf_timestamp = timestamp
-                    print(f"【FeatureTracker】Keyframe: {visual_features['timestamp']}")
+                if self._should_publish_to_estimator(timestamp):
+                    self._stage_visual(visual_features)
         finally:
             try:
                 self._finish_stream()

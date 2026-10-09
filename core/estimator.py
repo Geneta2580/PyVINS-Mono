@@ -53,6 +53,12 @@ class Estimator(threading.Thread):
 
         self.init_window_size = self.config.get('init_window_size', 10)
         self.initial_parallax = self.config.get('initial_parallax', 40)
+        self.keyframe_parallax = float(self.config.get('keyframe_parallax', 10.0))
+        self.keyframe_min_tracked = int(self.config.get('keyframe_min_tracked', 20))
+        self.init_quality_gate = bool(self.config.get('init_quality_gate', True))
+        self.init_min_alignment_attempts = int(self.config.get('init_min_alignment_attempts', 2))
+        self.init_alignment_attempts = 0
+        self.previous_init_scale = None
         self.init_feature_tracks = {}
 
         self.gravity_magnitude = self.config.get('gravity', 9.81)
@@ -122,13 +128,8 @@ class Estimator(threading.Thread):
                     feature_ids = package['feature_ids']
                     image = package['image']
                     is_stationary = package['is_stationary']
-                    is_keyframe = bool(package['is_kf'])
                     if is_stationary:
                         print(f"【Estimator】: Stationary frame detected at timestamp: {timestamp}")
-
-                    # 初始化窗口只收关键帧，避免普通帧占满 window_size
-                    if not self.is_initialized and not is_keyframe:
-                        continue
 
                     # 关键帧和普通帧使用同一套帧表示
                     filtered_features = []
@@ -147,10 +148,9 @@ class Estimator(threading.Thread):
                     new_frame.add_visual_features(filtered_features, filtered_ids)
                     new_frame.set_image(image)
                     new_frame.set_is_stationary(is_stationary)
-                    new_frame.set_is_keyframe(is_keyframe)
 
                     self.next_f_id += 1
-                    self._schedule_frame(new_frame, is_stationary, is_keyframe)
+                    self._schedule_frame(new_frame, is_stationary)
 
             except queue.Empty:
                 continue
@@ -171,9 +171,9 @@ class Estimator(threading.Thread):
                     self.last_processed_imu_timestamp = timestamp
         self._drain_scheduled_frames()
 
-    def _schedule_frame(self, frame, is_stationary, is_keyframe):
+    def _schedule_frame(self, frame, is_stationary):
         """图像时刻若还没有 IMU，就先挂起。EuRoC 常有一条与图像时间相同的 IMU，它可能排在图像之后。"""
-        self.scheduled_frames.append((frame, is_stationary, is_keyframe))
+        self.scheduled_frames.append((frame, is_stationary))
         self._drain_scheduled_frames()
 
     def _imu_covers_timestamp(self, timestamp):
@@ -185,7 +185,7 @@ class Estimator(threading.Thread):
     def _drain_scheduled_frames(self):
         """从队列中取出最早的帧，并将其添加到LocalMap中。"""
         while self.scheduled_frames:
-            frame, is_stationary, is_keyframe = self.scheduled_frames[0]
+            frame, is_stationary = self.scheduled_frames[0]
             if not self._imu_covers_timestamp(frame.get_timestamp()):
                 return
             self.scheduled_frames.pop(0)
@@ -199,10 +199,47 @@ class Estimator(threading.Thread):
                     print(f"【Init】: Collecting frames... {len(active_frames)}/{self.init_window_size}")
             # 如果已初始化，则处理帧
             else:
-                self.process_frame_data(frame, is_stationary, is_keyframe)
+                self.process_frame_data(frame, is_stationary)
                 self.last_processed_f_id = frame.get_id()
 
+    @staticmethod
+    def _feature_map(frame):
+        return {
+            int(feature_id): np.asarray(point, dtype=float).reshape(-1)[:2]
+            for feature_id, point in zip(
+                frame.get_visual_feature_ids(), frame.get_visual_features())
+        }
+
+    def judge_keyframe(self, active_frames):
+        """判断最新帧是否为关键帧。视差用去畸变像素坐标计算。"""
+        if len(active_frames) < 3:
+            return True
+
+        # 获取最新帧和次新帧的特征点
+        newest_features = self._feature_map(active_frames[-1])
+        previous_features = self._feature_map(active_frames[-2])
+        tracked_into_newest = newest_features.keys() & previous_features.keys()
+
+        # 最新帧和次新帧的共视太少，保留上一帧，当前帧作为关键帧。
+        if len(tracked_into_newest) < self.keyframe_min_tracked:
+            return True
+
+        # 次新帧和它的前一帧没有共视时，也作为关键帧。
+        frame_left = self._feature_map(active_frames[-3])
+        frame_right = previous_features
+        common_ids = frame_left.keys() & frame_right.keys()
+        if not common_ids:
+            return True
+
+        # 这两帧的共视平均视差达到阈值，当前帧是关键帧。
+        parallax = float(np.mean([
+            np.linalg.norm(frame_right[feature_id] - frame_left[feature_id])
+            for feature_id in common_ids
+        ]))
+        return parallax >= self.keyframe_parallax
+
     def marginalization_flag(self, is_keyframe):
+        """关键帧边缘化最老帧，普通帧边缘化次新帧。"""
         if is_keyframe:
             return self.MARGIN_OLD
         return self.MARGIN_SECOND_NEW
@@ -262,18 +299,21 @@ class Estimator(threading.Thread):
         self.local_map.remove_frame(frame_id)
 
     def _apply_margin_result(self, result):
-        """边缘化成功后才删除同一帧，以及已经随该帧消掉的 host 路标。"""
+        """边缘化成功后删除旧帧观测。host 离开时消除旧逆深度，剩余观测改挂到新 host。"""
         if not isinstance(result, dict) or not result.get('success'):
             return
         frame_id = result.get('marginalized_frame_id')
         if frame_id is None:
             return
-        landmark_ids = result.get('marginalized_landmark_ids', [])
+        # removed_landmark_ids 只含死亡路标；存活点已转移 host，不在此删除。
+        landmark_ids = result.get('removed_landmark_ids', [])
+        kept = result.get('kept_landmark_count', 0)
         print(
-            f"【Estimator】: Commit marginalization of frame {frame_id} "
-            f"and {len(landmark_ids)} host landmarks."
+            f"【Estimator】: Commit marginalization of frame {frame_id}, "
+            f"kept {kept} landmarks, removed {len(landmark_ids)} landmarks."
         )
-        self._drop_marginalized_frame(frame_id)
+        self._drop_imu_cache_for_frame(frame_id)
+        self.local_map.remove_frame(frame_id, transfer_host=True)
         for lm_id in landmark_ids:
             self.local_map.landmarks.pop(lm_id, None)
         self._assert_window_consistency()
@@ -367,41 +407,34 @@ class Estimator(threading.Thread):
     def triangulate_new_landmarks(self):
         newly_triangulated_for_backend = {}
         frame_window = self.local_map.get_active_frames()
-        for lm in self.local_map.get_candidate_landmarks():            
+        poses = []
+        frame_index = {}
+        for index, frame in enumerate(frame_window):
+            body_pose = frame.get_global_pose()
+            poses.append(None if body_pose is None else body_pose @ self.T_bc)
+            frame_index[frame.get_id()] = index
 
-            is_ready, first_frame, last_frame = lm.is_ready_for_triangulation(frame_window, min_parallax=40)
-            
-            if is_ready:
-                T_w_b_1 = first_frame.get_global_pose()
-                T_w_b_2 = last_frame.get_global_pose()
-                
-                if T_w_b_1 is None or T_w_b_2 is None:
-                    continue
+        max_error = float(self.config.get('triangulation_max_reprojection_error', 5.0))
+        for lm in self.local_map.get_candidate_landmarks():
+            observations = [
+                (frame_index[frame_id], uv)
+                for frame_id, uv in lm.observations.items()
+                if frame_id in frame_index and poses[frame_index[frame_id]] is not None
+            ]
+            if len(observations) < 3:
+                continue
 
-                T_w_c_1 = T_w_b_1 @ self.T_bc
-                T_w_c_2 = T_w_b_2 @ self.T_bc
-                T_c_2_1 = np.linalg.inv(T_w_c_2) @ T_w_c_1
+            # 多帧三角化新地图点（包含重投影误差、深度范围、视差角检查）
+            point = self.sfm_processor.triangulate_track(
+                observations, poses, max_error=max_error,
+                min_depth=self.local_map.min_depth,
+                max_depth=self.local_map.max_depth,
+                min_parallax_angle_deg=float(self.config.get('min_parallax_angle_deg', 0.5)))
+            if point is None:
+                continue
+            lm.set_triangulated(point)
+            newly_triangulated_for_backend[lm.id] = point
 
-                R, t = T_c_2_1[:3, :3], T_c_2_1[:3, 3].reshape(3, 1)
-
-                pts1 = np.array([lm.get_observation(first_frame.get_id())])
-                pts2 = np.array([lm.get_observation(last_frame.get_id())])
-
-                points_3d_in_c1, mask = self.sfm_processor.triangulate_points(pts1, pts2, R, t)
-
-                if len(points_3d_in_c1) > 0:
-                    points_3d_world = (T_w_c_1[:3, :3] @ points_3d_in_c1.T + T_w_c_1[:3, 3].reshape(3, 1)).flatten()
-                    is_healthy = self.local_map.check_landmark_health(lm.id, points_3d_world)
-                    if is_healthy:
-                        lm.set_triangulated(points_3d_world)
-                        newly_triangulated_for_backend[lm.id] = points_3d_world
-                    
-                    else:
-                        continue
-                
-                else:
-                    continue
-    
         return newly_triangulated_for_backend
             
     
@@ -548,7 +581,7 @@ class Estimator(threading.Thread):
                 )
 
         # 视觉惯性初始化
-        alignment_success, scale, gyro_bias, velocities, gravity_w = VIOInitializer.initialize(
+        alignment_success, scale, gyro_bias, velocities, refined_gravity, diagnostics = VIOInitializer.initialize(
             initial_keyframes, 
             initial_imu_factors, 
             self.imu_processor, 
@@ -557,6 +590,23 @@ class Estimator(threading.Thread):
         )
 
         if alignment_success:
+            self.init_alignment_attempts += 1
+            accepted, reason = self._accept_initial_alignment(
+                scale, gyro_bias, diagnostics, self.init_alignment_attempts)
+            print(
+                f"【Init Quality】span={diagnostics['span']:.3f}s "
+                f"excitation={diagnostics['excitation']:.3f} "
+                f"gravity={diagnostics['linear_gravity_norm']:.3f} "
+                f"cond={diagnostics['condition_number']:.3e} scale={scale} "
+                f"bg={np.asarray(gyro_bias)} {'PASS' if accepted else 'REJECT ' + reason}"
+            )
+            if not accepted:
+                print("【Init】: Quality gate rejected this window. Sliding window.")
+                self._discard_oldest_frame()
+                return False
+
+            gravity_w = VIOInitializer.align_to_world_frame(
+                initial_keyframes, velocities, refined_gravity, scale, self.T_bc)
             # 尺度对齐之后，用公制相机位姿重三角化全部初始化轨迹。
             self._retriangulate_metric_tracks(initial_keyframes)
             print("【Init】: Alignment successful. Calling backend to build initial graph...")
@@ -639,6 +689,37 @@ class Estimator(threading.Thread):
             self._discard_oldest_frame()
 
         return alignment_success
+
+    def _accept_initial_alignment(self, scale, gyro_bias, diagnostics, attempt_count):
+        """Reject observably weak V-I alignment before it mutates window poses."""
+        if not self.init_quality_gate:
+            return True, 'gate disabled'
+        if attempt_count < self.init_min_alignment_attempts:
+            self.previous_init_scale = float(scale)
+            return False, 'waiting for a neighboring scale'
+        if not np.isfinite(scale) or scale <= 0.0:
+            return False, 'non-positive scale'
+        if diagnostics['span'] < float(self.config.get('init_min_span', 0.8)):
+            return False, 'window too short'
+        if diagnostics['excitation'] < float(self.config.get('init_min_excitation', 0.25)):
+            return False, 'insufficient IMU excitation'
+        gravity_error = abs(diagnostics['linear_gravity_norm'] - self.gravity_magnitude)
+        if gravity_error > float(self.config.get('init_max_gravity_error', 1.0)):
+            return False, 'linear gravity inconsistent'
+        if diagnostics['condition_number'] > float(self.config.get('init_max_condition_number', 1e8)):
+            return False, 'ill-conditioned alignment'
+        if np.linalg.norm(np.asarray(gyro_bias, dtype=float)) > float(
+                self.config.get('init_max_gyro_bias', 0.5)):
+            return False, 'gyro bias too large'
+        if self.previous_init_scale is None:
+            self.previous_init_scale = float(scale)
+            return False, 'waiting for a neighboring scale'
+        relative_scale_change = abs(float(scale) - self.previous_init_scale) / max(
+            abs(float(scale)), abs(self.previous_init_scale), 1e-9)
+        self.previous_init_scale = float(scale)
+        if relative_scale_change > float(self.config.get('init_max_scale_change', 0.20)):
+            return False, f'neighboring scale changed by {relative_scale_change:.3f}'
+        return True, 'quality checks passed'
     
     def _retriangulate_metric_tracks(self, frames):
         """尺度对齐之后，用公制相机位姿重三角化全部初始化轨迹。"""
@@ -692,7 +773,14 @@ class Estimator(threading.Thread):
         print(f"【Visual Init】: Success! Map has {len(self.local_map.landmarks)} landmarks.")
         return True
 
-    def process_frame_data(self, new_frame, is_stationary, is_keyframe):
+    def process_frame_data(self, new_frame, is_stationary):
+        active_frames = self.local_map.get_active_frames()
+
+        # 关键帧判断
+        is_keyframe = self.judge_keyframe(active_frames)
+        new_frame.set_is_keyframe(is_keyframe)
+
+        # 边缘化类型判断
         margin_flag = self.marginalization_flag(is_keyframe)
         margin_name = "MARGIN_OLD" if margin_flag == self.MARGIN_OLD else "MARGIN_SECOND_NEW"
         print(
@@ -700,7 +788,6 @@ class Estimator(threading.Thread):
             f"is_keyframe={is_keyframe} margin={margin_name}"
         )
 
-        active_frames = self.local_map.get_active_frames()
         if len(active_frames) < 2:
             return
 
@@ -798,8 +885,13 @@ class Estimator(threading.Thread):
 
         # 边缘化最老帧
         if margin_flag == self.MARGIN_OLD:
+            observation_frames = {
+                lm_id: set(self.local_map.landmarks[lm_id].observations.keys())
+                for lm_id in window_landmarks
+                if lm_id in self.local_map.landmarks
+            }
             margin_result = self.backend.marginalize_oldest(
-                window_imu_factors, opt_result['visual_groups'])
+                window_imu_factors, opt_result['visual_groups'], observation_frames)
             if margin_result and margin_result.get('success'):
                 self._apply_margin_result(margin_result)
             else:
@@ -819,7 +911,12 @@ class Estimator(threading.Thread):
                 if edge_ac is None:
                     print("【Estimator】: Failed to reintegrate PIM. Keep the second-newest frame.")
                 else:
-                    margin_result = self.backend.marginalize_second_newest(frame_b.get_id())
+                    hosted_landmark_ids = [
+                        lm_id for lm_id, landmark in self.local_map.landmarks.items()
+                        if landmark.host_frame_id == frame_b.get_id()
+                    ]
+                    margin_result = self.backend.marginalize_second_newest(
+                        frame_b.get_id(), hosted_landmark_ids)
                     if margin_result and margin_result.get('success'):
                         self._commit_margin_second_new(frame_a, frame_b, frame_c, edge_ac)
                     else:

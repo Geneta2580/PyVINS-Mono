@@ -4,12 +4,9 @@ import time
 
 class VisualProcessor:
     def __init__(self, config):
-        # 前端切换关键帧参数
         self.config = config
         self.max_features_to_detect = self.config.get('max_features_to_detect', 500) # 最大特征点数
-        self.min_parallax = self.config.get('min_parallax', 10) # 最小视差
         self.min_stationary_parallax = self.config.get('min_stationary_parallax', 3.0) # 最小静止视差
-        self.min_track_ratio = self.config.get('min_track_ratio', 0.8) # 最小跟踪比例
         self.visualize_flag = self.config.get('visualize', True) # 是否可视化追踪结果
 
         # 读取相机内参
@@ -42,7 +39,6 @@ class VisualProcessor:
         # 特征点追踪时间
         self.feature_ages = {}
         self.long_track_age_threshold = self.config.get('long_track_age_threshold', 5)  # 定义"长追踪点"的age阈值
-        self.min_long_track_ratio = self.config.get('min_long_track_ratio', 0.3)  # 长追踪点的最小比例
         self.max_age_for_color = self.config.get('max_age_for_color', 10)  # 修复：添加这行
 
         # 设置mask
@@ -142,14 +138,13 @@ class VisualProcessor:
         curr_gray = cv2.GaussianBlur(curr_gray, (kernel_size, kernel_size), 0)
         
         # 一些局部变量的初始化
-        is_kf = False
         is_stationary = False
         new_pts = None
 
         # 记录上一帧总点数（用于计算tracking_rate）
         prev_total_count = 0 if self.prev_pt_ids is None else len(self.prev_pt_ids)
 
-        # 第一帧处理逻辑，必定为关键帧
+        # 第一帧只检测特征，不做关键帧判定
         if self.prev_gray is None or self.prev_pts is None or len(self.prev_pts) == 0:
             self.prev_gray = curr_gray
             self.prev_pts = self.detect_features(self.prev_gray, self.max_features_to_detect) # (N, 1, 2)
@@ -161,7 +156,6 @@ class VisualProcessor:
                     "long_track_ratio": 0.0,
                     "mean_parallax": 0.0,
                     "is_stationary": 0,
-                    "is_kf_visual": 0,
                     "prev_total_count": 0,
                 }
                 empty_viz = {
@@ -192,7 +186,6 @@ class VisualProcessor:
                 "long_track_ratio": 0.0,
                 "mean_parallax": 0.0,
                 "is_stationary": 0,
-                "is_kf_visual": 1,
                 "prev_total_count": 0,
             }
             viz_payload = {
@@ -204,7 +197,7 @@ class VisualProcessor:
 
             # 可视化第一帧（不再在这里调用，由FeatureTracker调用）
             # if self.visualize_flag:
-            #     self.visualize_tracking(image, self.prev_pts, self.prev_pts, self.prev_pt_ids, True, False, 0.0, timestamp)
+            #     self.visualize_tracking(image, self.prev_pts, self.prev_pts, self.prev_pt_ids, False, 0.0, timestamp)
 
             return undistorted_pts, self.prev_pt_ids, stats, viz_payload
 
@@ -358,19 +351,6 @@ class VisualProcessor:
             long_track_count = sum(1 for fid in good_ids if self.feature_ages.get(fid, 0) >= self.long_track_age_threshold)
             long_track_ratio = float(long_track_count / len(good_ids))
 
-        # 判断关键帧视觉条件（is_kf_visual）
-        is_kf_visual = 0
-        # 条件1：平均视差大于最小视差
-        if mean_parallax > self.min_parallax:
-            is_kf_visual = 1
-        # 条件2：长追踪点比例小于最小长追踪比例
-        if len(good_ids) > 0 and long_track_ratio < self.min_long_track_ratio:
-            is_kf_visual = 1
-        # 判断关键视觉条件3：
-        # 跟踪到的特征点数量小于最小跟踪比例（新特征点数量大于一定比例），则认为是关键帧
-        if len(good_curr) < (self.max_features_to_detect * self.min_track_ratio):
-            is_kf_visual = 1
-
         num_current_features = len(good_curr)
 
         final_pts = good_curr
@@ -412,7 +392,6 @@ class VisualProcessor:
             "long_track_ratio": float(long_track_ratio),
             "mean_parallax": float(mean_parallax),
             "is_stationary": int(is_stationary),
-            "is_kf_visual": int(is_kf_visual),
             "prev_total_count": int(prev_total_count),
         }
         viz_payload = {
@@ -446,7 +425,7 @@ class VisualProcessor:
             cv2.putText(vis_img, f"{feature_id}", (p2_t[0] + 5, p2_t[1] - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
 
-    def visualize_tracking(self, image, good_prev, good_curr, good_ids, is_kf, is_stationary, mean_parallax, timestamp, prev_total_count=0, long_track_ratio=0.0, processed_gray=None):
+    def visualize_tracking(self, image, good_prev, good_curr, good_ids, is_stationary, mean_parallax, timestamp, prev_total_count=0, long_track_ratio=0.0, processed_gray=None):
         """
         可视化特征点追踪结果。左侧是原始彩色图，右侧是预处理后的跟踪图。
         
@@ -462,12 +441,11 @@ class VisualProcessor:
             if prev_total_count > 0:
                 tracking_rate = len(good_ids) / prev_total_count
                 info_text1 = (f"Features: {len(good_ids)}/{prev_total_count} ({tracking_rate:.0%}) | "
-                             f"KF: {is_kf} | "
                              f"Stationary: {is_stationary} | Parallax: {mean_parallax:.2f}")
             else:
-                info_text1 = f"Features: {len(good_ids)} | Long: {long_track_ratio:.0%} | KF: {is_kf} | Stationary: {is_stationary} | Parallax: {mean_parallax:.2f}"
+                info_text1 = f"Features: {len(good_ids)} | Long: {long_track_ratio:.0%} | Stationary: {is_stationary} | Parallax: {mean_parallax:.2f}"
         else:
-            info_text1 = f"Features: 0 | KF: {is_kf}"
+            info_text1 = "Features: 0"
 
         cv2.putText(vis_img, info_text1, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)

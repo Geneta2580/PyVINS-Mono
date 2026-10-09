@@ -13,7 +13,7 @@ class Landmark:
         self.status = LandmarkStatus.CANDIDATE
         self.position_3d = None
         
-        # 首个观测帧。MARGIN_OLD 时随该帧消除；MARGIN_SECOND_NEW 才把 host 转到剩余最早观测。
+        # 首个观测帧。旧帧离开后，这个标签转到剩余最早观测，世界坐标 Point3 保持不变。
         self.host_frame_id = first_frame_id
 
         # 记录所有的观测 {frame_id: pt_2d_coords}
@@ -39,7 +39,7 @@ class Landmark:
         self.position_3d = position_3d
         self.status = LandmarkStatus.TRIANGULATED
 
-    def is_ready_for_triangulation(self, frame_window, min_parallax):
+    def is_ready_for_triangulation(self, frame_window, parallax_threshold):
         # 必须是候选点，且至少有三个观测
         if self.status != LandmarkStatus.CANDIDATE or self.get_observation_count() < 3:
             return False, None, None
@@ -60,7 +60,7 @@ class Landmark:
         pt2 = self.observations[last_frame_id]
         parallax = np.linalg.norm(pt1 - pt2)
 
-        if parallax > min_parallax:
+        if parallax > parallax_threshold:
             return True, first_frame, last_frame
         else:
             # print(f"[Trace l{self.id}]: FAILED triangulation check. Parallax: {parallax:.2f}px")

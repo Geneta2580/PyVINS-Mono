@@ -27,26 +27,27 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = PROJECT_ROOT / "config" / "euroc"
+SHARED_CONFIG = CONFIG_DIR / "euroc.yaml"
 DEFAULT_OUTPUT = PROJECT_ROOT / "output" / "euroc"
 
-# Folder name on disk -> shared yaml. dataset_path is overridden per sequence.
+# dataset_path in euroc.yaml is overridden per sequence.
 SEQUENCES = [
-    ("MH_01_easy", "euroc_MH01-05.yaml"),
-    ("MH_02_easy", "euroc_MH01-05.yaml"),
-    ("MH_03_medium", "euroc_MH01-05.yaml"),
-    ("MH_04_difficult", "euroc_MH01-05.yaml"),
-    ("MH_05_difficult", "euroc_MH01-05.yaml"),
-    ("V1_01_easy", "euroc_V101-03.yaml"),
-    ("V1_02_medium", "euroc_V101-03.yaml"),
-    ("V1_03_difficult", "euroc_V101-03.yaml"),
-    ("V2_01_easy", "euroc_V201-03.yaml"),
-    ("V2_02_medium", "euroc_V201-03.yaml"),
-    ("V2_03_difficult", "euroc_V201-03.yaml"),
+    "MH_01_easy",
+    "MH_02_easy",
+    "MH_03_medium",
+    "MH_04_difficult",
+    "MH_05_difficult",
+    "V1_01_easy",
+    "V1_02_medium",
+    "V1_03_difficult",
+    "V2_01_easy",
+    "V2_02_medium",
+    "V2_03_difficult",
 ]
 
 
 def default_dataset_root():
-    config_path = CONFIG_DIR / "euroc_MH01-05.yaml"
+    config_path = SHARED_CONFIG
     with open(config_path, "r") as handle:
         config = yaml.safe_load(handle)
     return Path(config["dataset_path"]).parent
@@ -201,7 +202,7 @@ def run_sequence(config_path, log_path, seq_index, seq_total, name, image_count)
 
 def parse_ate_stdout(text):
     def grab(name):
-        match = re.search(rf"^{name}\s+([0-9.eE+-]+)", text, re.MULTILINE)
+        match = re.search(rf"^\s*{name}\s+([0-9.eE+-]+)", text, re.MULTILINE)
         return float(match.group(1)) if match else None
 
     compared = re.search(r"Compared\s+(\d+)\s+absolute pose pairs", text)
@@ -227,7 +228,6 @@ def evaluate_ate(groundtruth, estimated, output_dir, label):
         "--t_max_diff", "0.02",
         "-v", "--no_warnings",
         "--save_results", str(output_dir / f"ate_{label}.zip"),
-        "--save_plot", str(output_dir / f"ate_{label}.png"),
     ]
     if label == "sim3":
         command.append("-s")
@@ -333,14 +333,13 @@ def main():
     args = parse_args()
     dataset_root = args.dataset_root or default_dataset_root()
     output_root = args.output if args.output.is_absolute() else PROJECT_ROOT / args.output
-    selected = {name: config_name for name, config_name in SEQUENCES}
     if args.sequences:
-        unknown = [name for name in args.sequences if name not in selected]
+        unknown = [name for name in args.sequences if name not in SEQUENCES]
         if unknown:
             print(f"Unknown sequence(s): {', '.join(unknown)}")
-            print("Known sequences: " + ", ".join(name for name, _ in SEQUENCES))
+            print("Known sequences: " + ", ".join(SEQUENCES))
             return 1
-        order = [(name, selected[name]) for name in args.sequences]
+        order = list(args.sequences)
     else:
         order = list(SEQUENCES)
 
@@ -349,14 +348,15 @@ def main():
         return 1
 
     print(f"Dataset root: {dataset_root}")
+    print(f"Config:       {SHARED_CONFIG}")
     print(f"Output:       {output_root}")
     print(f"Sequences:    {len(order)}")
 
     rows = []
-    for index, (name, config_name) in enumerate(order, start=1):
+    for index, name in enumerate(order, start=1):
         sequence_dir = dataset_root / name
         sequence_output = output_root / name
-        template = CONFIG_DIR / config_name
+        template = SHARED_CONFIG
         print(f"\n[{index}/{len(order)}] {name}")
 
         if not sequence_dir.is_dir():

@@ -5,20 +5,24 @@
 # euroc：/home/pangjunxiang/dataset/Euroc/MH_01_easy
 # tum：/home/pangjunxiang/dataset/TUM/freiburg1
 # kitti:
-dataset_path: "/home/geneta/dataset/source_dataset/euroc/V1_01_easy"
+dataset_path: "/home/geneta/dataset/source_dataset/euroc/MH_02_easy"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
 
 # ============================================= 视觉前端配置参数 =============================================
 # 初始化三角化两帧视差阈值
-initial_parallax: 40
+initial_parallax: 30
+initial_min_matches: 20
 
 # 初始SFM三角化重投影误差阈值
 initial_sfm_reprojection_threshold: 1.5
 
-# 选择关键帧最小视差 10
-min_parallax: 10
+# 选择关键帧最小视差，单位像素
+keyframe_parallax: 10
+
+# 关键帧最小跟踪特征点数
+keyframe_min_tracked: 20
 
 # 静止视差
 min_stationary_parallax: 0.5
@@ -29,9 +33,8 @@ max_features_to_detect: 150
 # 最小跟踪比例
 min_track_ratio: 0.5
 
-# 最小跟踪比例
-min_kf_interval: 0.2 # 最小关键帧时间间隔(s) 0.2
-max_kf_interval: 0.5 # 最大关键帧时间间隔(s)
+# 前端保持 20 Hz 跟踪，按 VINS-Mono 的 EuRoC 配置以 10 Hz 向估计器发布。
+estimator_publish_hz: 10
 
 # 特征点间的最小像素距离
 min_dist: 30
@@ -50,7 +53,7 @@ use_imu_flow_prediction: False
 
 # 灰度预处理：CLAHE 对比度限制，高斯核边长（奇数）
 clahe_clip_limit: 3.0
-gaussian_kernel_size: 3
+gaussian_kernel_size: 1
 
 # RANSAC相关参数
 use_ransac: True
@@ -62,23 +65,23 @@ visualize: True
 
 # ============================================= IMU配置参数 =============================================
 # 重力模长
-gravity: 9.81
+gravity: 9.81007
 
 # 注意这里只是sigma，不是sigma^2
-accel_noise_sigma: 0.004          # 从0.002改为0.008
-gyro_noise_sigma: 0.00025        # 从0.0003改为0.001
-accel_bias_rw_sigma: 0.003        # 从0.00016968改为0.0008
-gyro_bias_rw_sigma: 0.00002     # 从0.000019393改为0.00008
+accel_noise_sigma: 0.004
+gyro_noise_sigma: 0.00025
+accel_bias_rw_sigma: 0.003
+gyro_bias_rw_sigma: 0.00002
 
 # ============================================= 地图管理参数 =============================================
 # 三角化新地图点条件检查
 max_depth: 60 # 地图点三角化深度检查是否正常
 min_depth: 0.2
-min_parallax_angle_deg: 5.0 # 三角化新地图点最小视差角度
-triangulation_max_reprojection_error: 5.0 # 三角化新地图点最大重投影误差
+min_parallax_angle_deg: 0.5 # Point3 数值稳定性保护；VINS逆深度本身不设40px硬门限
+triangulation_max_reprojection_error: 5.0 # 三角化新地图点最大重投影误差（每一帧的重投影误差不超过5px）
 
 # 优化新地图点最大重投影误差
-optimization_max_reprojection_error: 15.0 # 地图点进入优化窗口的最大重投影误差
+optimization_max_reprojection_error: 30.0 # 地图点进入优化窗口的最大重投影误差
 optimization_max_delete_reprojection_error: 40.0 # 优化新地图点最大删除重投影误差(只有开启优化后抑制不良优化点才有效)
 
 # ============================================= 后端配置参数 =============================================
@@ -86,7 +89,15 @@ optimization_max_delete_reprojection_error: 40.0 # 优化新地图点最大删�
 window_size: 10
 
 # 初始化窗口大小
-init_window_size: 10
+init_window_size: 11
+init_quality_gate: true
+init_min_alignment_attempts: 2
+init_min_span: 0.8
+init_min_excitation: 0.25
+init_max_gravity_error: 1.0
+init_max_condition_number: 1.0e8
+init_max_gyro_bias: 0.5
+init_max_scale_change: 0.20
 
 # 初始化外参
 T_bc: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
@@ -95,7 +106,11 @@ T_bc: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
        0.0, 0.0, 0.0, 1.0]
 
 # 视觉噪声sigma
-visual_noise_sigma: 2.0
+visual_noise_sigma: 1.5
+visual_robust_kernel: cauchy
+
+# 低视差零速先验。关闭后不再加入 σ=0.03 m/s 的速度约束。
+use_zupt: false
 
 # ============================================= 输出结果配置 =============================================
 # 是否使用IMU输出
@@ -114,4 +129,3 @@ fps_report_interval: 0
 
 # 输出轨迹文件路径
 trajectory_output_path: "output/estimated_trajectory.txt" 
-

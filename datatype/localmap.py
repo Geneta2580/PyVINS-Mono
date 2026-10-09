@@ -16,10 +16,8 @@ class LocalMap:
 
         self.max_depth = self.config.get('max_depth', 400)
         self.min_depth = self.config.get('min_depth', 0.4)
-        self.triangulation_max_reprojection_error = self.config.get('triangulation_max_reprojection_error', 60.0)
         self.optimization_max_reprojection_error = self.config.get('optimization_max_reprojection_error', 60.0)
         self.optimization_max_delete_reprojection_error = self.config.get('optimization_max_delete_reprojection_error', 1000.0)
-        self.min_parallax_angle_deg = self.config.get('min_parallax_angle_deg', 5.0)
 
         self.cam_intrinsics = np.asarray(self.config.get('cam_intrinsics')).reshape(3, 3)
 
@@ -39,7 +37,7 @@ class LocalMap:
                 self.landmarks[lm_id] = new_lm
 
     def remove_frame(self, frame_id, transfer_host=False):
-        """删除指定帧及其观测。普通帧边缘化时把 host 转到剩余最早观测，不改世界坐标。"""
+        """删除指定帧及其观测。host 帧离开时把标签转到剩余最早观测，不改世界坐标，也不新建 Point3。"""
         if frame_id not in self.frames:
             return []
 
@@ -93,99 +91,6 @@ class LocalMap:
     def get_candidate_landmarks(self):
         return [lm for lm in self.landmarks.values() if lm.status == LandmarkStatus.CANDIDATE]
 
-    def check_landmark_health(self, landmark_id, candidate_position_3d=None):
-        lm = self.landmarks.get(landmark_id)
-        # 必须是已三角化的点才有3D位置
-        if not lm:
-            return False
-
-        # 对于还没有确认三角化的点，使用候选位置
-        if candidate_position_3d is not None:
-            landmark_pos = candidate_position_3d
-        # 对于已经三角化的点，使用三角化后的位置
-        elif lm.status == LandmarkStatus.TRIANGULATED and lm.position_3d is not None:
-            landmark_pos = lm.position_3d
-        else:
-            return False
-
-        observing_frame_ids = lm.get_observing_frame_ids()
-        witness_frames = [self.frames[frame_id] for frame_id in observing_frame_ids if frame_id in self.frames]
-
-        # 至少需要2个观测帧
-        if len(witness_frames) < 3:
-            return False
-            
-        positions = []
-        for frame in witness_frames:
-            T_w_b = frame.get_global_pose()
-            T_w_c = T_w_b @ self.T_bc
-            if T_w_c is not None:
-                positions.append(T_w_c[:3, 3])
-
-        if len(positions) < 3:
-            return False
-            
-        positions = np.array(positions)
-
-        # 计算观测基线
-        baseline = np.linalg.norm(np.ptp(positions, axis=0))
-
-        # # 基线太短，排除
-        # if baseline < 0.05:
-        #     print(f"【Health Check】: Landmark {lm.id} failed baseline check. Baseline: {baseline:.4f}m")
-        #     return False
-
-        # 计算路标点到观测中心的大致深度
-        avg_cam_pos = np.mean(positions, axis=0) # 观测中心
-        depth = np.linalg.norm(landmark_pos - avg_cam_pos)
-
-        # 避免除以零
-        if depth < 1e-6:
-            return False
-        
-        # 检查基线与深度的比值（近似于 2 * tan(parallax_angle / 2)）
-        # 一个小的角度，tan(theta)约等于theta（弧度）
-        ratio = baseline / depth
-        threshold = np.deg2rad(self.min_parallax_angle_deg)
-
-        print(f"【Triangulation Health Check】: Landmark {lm.id} ratio: {ratio:.4f}, threshold: {threshold:.4f}")
-        if ratio < threshold:
-            print(f"【Triangulation Health Check】: Landmark {lm.id} failed parallax check. theta: {ratio:.4f}")
-            return False
-
-        # 检查重投影误差和深度
-        reproj_error_total = 0.0
-        for frame in witness_frames:
-            T_w_b = frame.get_global_pose()
-            if T_w_b is None: continue
-
-            # 转换到相机坐标系下
-            T_w_c = T_w_b @ self.T_bc
-            T_c_w = np.linalg.inv(T_w_c)
-            point_in_cam_homo = T_c_w @ np.append(landmark_pos, 1.0)
-            
-            # 深度必须为正
-            depth = point_in_cam_homo[2] / point_in_cam_homo[3]
-            print(f"【Triangulation Health Check】: Landmark {lm.id} depth: {depth:.4f}")
-            if depth <= self.min_depth or depth > self.max_depth:
-                print(f"【Triangulation Health Check】: Landmark {lm.id} failed cheirality in frame {frame.get_id()}. Depth: {depth:.4f}m")
-                return False
-
-            # 检查重投影误差
-            rvec, _ = cv2.Rodrigues(T_c_w[:3,:3])
-            tvec = T_c_w[:3,3]
-            reprojected_pt, _ = cv2.projectPoints(landmark_pos.reshape(1,1,3), rvec, tvec, self.cam_intrinsics, None)
-            reproj_error = np.linalg.norm(reprojected_pt.flatten() - lm.observations[frame.get_id()])
-            reproj_error_total += reproj_error
-
-        reproj_error_avg = reproj_error_total / len(witness_frames)
-        if reproj_error_avg > self.triangulation_max_reprojection_error:
-            print(f"【Triangulation Health Check】: Landmark {lm.id} failed reprojection in frame {frame.get_id()}. Error: {reproj_error_avg:.2f}px")
-            return False
-
-        return True
-
-    
     def check_landmark_health_after_optimization(self, landmark_id):
         lm = self.landmarks.get(landmark_id)
         # 必须是已三角化的点才有3D位置
