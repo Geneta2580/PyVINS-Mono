@@ -49,7 +49,14 @@ def main():
     estimator_to_viewer_queue = queue.Queue(maxsize=20)
 
     # 初始化数据加载器
-    dataloader_config = {'path': config['dataset_path'], 'dataset_type': config['dataset_type']}
+    dataloader_config = {
+        'path': config['dataset_path'],
+        'dataset_type': config['dataset_type'],
+        # Kalibr convention: t_imu = t_cam + timeshift_cam_imu.
+        # Apply the shift before image/IMU events are sorted and packetized.
+        'timeshift_cam_imu': config.get('timeshift_cam_imu', 0.0),
+        'apply_timeshift_cam_imu': config.get('apply_timeshift_cam_imu', True),
+    }
     data_loader = UnifiedDataloader(dataloader_config)
 
     # 实例化所有模块

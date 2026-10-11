@@ -8,6 +8,9 @@ class VisualProcessor:
         self.max_features_to_detect = self.config.get('max_features_to_detect', 500) # 最大特征点数
         self.min_stationary_parallax = self.config.get('min_stationary_parallax', 3.0) # 最小静止视差
         self.visualize_flag = self.config.get('visualize', True) # 是否可视化追踪结果
+        self.visualize_window_name = "Optical Flow"
+        # imshow 默认按原图像素开窗。ORI 左右拼图约 2944x1440，这里只缩小显示。
+        self.visualize_window_width = int(self.config.get('visualize_window_width', 960))
 
         # 读取相机内参
         cam_matrix_raw = self.config.get('cam_intrinsics', np.eye(3).flatten().tolist())
@@ -71,17 +74,34 @@ class VisualProcessor:
     # 特征点去畸变
     def undistort_points(self, points):
         if self.cam_matrix is None or self.dist_coeffs is None or len(points) == 0:
-            return points 
-        
-        # cv2 需要 (N, 1, 2) 的形状
-        points_reshaped = points.reshape(-1, 1, 2).astype(np.float32)
-        
-        # P=self.cam_matrix 表示去畸变后仍投影回原相机内参的像素坐标系
-        # 如果 P=None 或 identity，则返回归一化平面坐标
-        
-        undistorted_points = cv2.undistortPoints(points_reshaped, self.cam_matrix, self.dist_coeffs, P=self.cam_matrix)
-        
-        return undistorted_points.reshape(-1, 2)
+            return points
+
+        # OpenCV 的两类去畸变 API 都接收 (N, 1, 2)。使用 float64
+        # 避免鱼眼图像边缘的大角度反投影损失精度。
+        points_reshaped = np.asarray(points, dtype=np.float64).reshape(-1, 1, 2)
+        camera_matrix = np.asarray(self.cam_matrix, dtype=np.float64)
+
+        # P=K 把去畸变归一化点投影到内参为 K 的虚拟针孔像素平面。
+        # 因此返回值可继续交给现有的 SfM 和 Cal3_S2 后端。
+        if self.distortion_model in ('fisheye', 'equidistant'):
+            dist_coeffs = np.asarray(self.dist_coeffs, dtype=np.float64).reshape(4, 1)
+            undistorted_points = cv2.fisheye.undistortPoints(
+                points_reshaped,
+                camera_matrix,
+                dist_coeffs,
+                R=np.eye(3, dtype=np.float64),
+                P=camera_matrix,
+            )
+        else:
+            dist_coeffs = np.asarray(self.dist_coeffs, dtype=np.float64).reshape(-1)
+            undistorted_points = cv2.undistortPoints(
+                points_reshaped,
+                camera_matrix,
+                dist_coeffs,
+                P=camera_matrix,
+            )
+
+        return undistorted_points.reshape(-1, 2).astype(np.float32)
 
     # 按照特征点追踪时间重排并添加mask
     def filter_features_by_age(self, features, features_ids, image_shape):
@@ -457,11 +477,23 @@ class VisualProcessor:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             vis_img = np.hstack([vis_img, processed_bgr])
         
-        # 显示图像
-        cv2.imshow("Optical Flow", vis_img)
-        cv2.waitKey(1)
+        # 显示图像。窗口按固定宽度缩放，不跟随原图分辨率。
+        self._show_fixed_window(vis_img)
         
         return vis_img
+
+    def _show_fixed_window(self, vis_img):
+        height, width = vis_img.shape[:2]
+        display = vis_img
+        if width != self.visualize_window_width and width > 0:
+            display_height = max(1, int(round(height * self.visualize_window_width / width)))
+            display = cv2.resize(
+                vis_img,
+                (self.visualize_window_width, display_height),
+                interpolation=cv2.INTER_AREA,
+            )
+        cv2.imshow(self.visualize_window_name, display)
+        cv2.waitKey(1)
     
     def _predict_optical_flow_with_imu(self, imu_data_for_prediction, imu_processor):
         """

@@ -16,6 +16,17 @@ class UnifiedDataloader:
         self.config = dataset_config
         self.base_path = Path(dataset_config['path'])
         self.dataset_type = dataset_config.get('dataset_type', 'euroc').lower()
+        self.apply_timeshift_cam_imu = bool(
+            dataset_config.get('apply_timeshift_cam_imu', True)
+        )
+        try:
+            self.timeshift_cam_imu = float(
+                dataset_config.get('timeshift_cam_imu', 0.0)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeshift_cam_imu must be a finite number in seconds") from exc
+        if not np.isfinite(self.timeshift_cam_imu):
+            raise ValueError("timeshift_cam_imu must be a finite number in seconds")
         
         print(f"【Dataloader】: Initializing for dataset type: {self.dataset_type}")
 
@@ -29,9 +40,28 @@ class UnifiedDataloader:
         else:
             raise ValueError(f"Unsupported dataset type: {self.dataset_type}")
 
-        # === 2. 全局排序 ===
+        # === 2. 将相机时间戳转换到 IMU 时钟域 ===
+        # Kalibr convention: t_imu = t_cam + timeshift_cam_imu.  Only image
+        # timestamps are shifted; IMU timestamps already live in the target
+        # clock domain.  This must happen before global event sorting so the
+        # tracker and estimator bracket each image with the correct IMU data.
+        if self.apply_timeshift_cam_imu and self.timeshift_cam_imu != 0.0:
+            image_mask = self.unified_data['type'].eq('IMAGE')
+            self.unified_data.loc[image_mask, 'timestamp'] = (
+                self.unified_data.loc[image_mask, 'timestamp'].astype(float)
+                + self.timeshift_cam_imu
+            )
+            print(
+                "【Dataloader】: Applied camera-to-IMU time shift "
+                f"{self.timeshift_cam_imu:+.9f} s to {int(image_mask.sum())} images "
+                "(t_imu = t_cam + shift)"
+            )
+
+        # === 3. 全局排序 ===
         if not self.unified_data.empty:
-            self.unified_data.sort_values(by='timestamp', inplace=True, ignore_index=True)
+            self.unified_data.sort_values(
+                by='timestamp', kind='mergesort', inplace=True, ignore_index=True
+            )
             print(f"【Dataloader】: Dataloader initialized with {len(self.unified_data)} total events")
         else:
             print("【Warning】: Dataframe is empty!")

@@ -1,0 +1,105 @@
+# ORI r01 / cam0 configuration.
+# Calibration source:
+#   /home/geneta/dataset/ORI/kalibr_imucam_chain.yaml
+#   /home/geneta/dataset/ORI/kalibr_imu_chain.yaml
+
+# Exported EuRoC layout: mav0/cam0 and mav0/imu0 under this directory.
+dataset_path: "/home/geneta/dataset/ORI/r01"
+dataset_type: "euroc"
+
+# Enable Kalibr camera-to-IMU timestamp compensation in UnifiedDataloader.
+# Convention: t_imu = t_cam + timeshift_cam_imu.  Therefore this negative
+# value moves each camera timestamp 4.024710 ms earlier on the IMU clock.
+apply_timeshift_cam_imu: true
+timeshift_cam_imu: -0.004024710194977835
+
+# ============================================= Visual frontend =============================================
+initial_parallax: 30
+initial_min_matches: 20
+initial_sfm_reprojection_threshold: 1.5
+keyframe_parallax: 10
+keyframe_min_tracked: 20
+min_stationary_parallax: 0.5
+max_features_to_detect: 150
+min_track_ratio: 0.5
+
+# ORI cam0 is approximately 30 Hz; keep the estimator/keyframe input at 10 Hz.
+estimator_publish_hz: 10
+min_dist: 30
+
+image_width: 1472
+image_height: 1440
+
+# Kalibr cam0 pinhole + equidistant calibration. P=K is used by
+# fisheye.undistortPoints, so this K is also the virtual pinhole K used by the
+# existing SfM/backend.
+cam_intrinsics: [463.9994465216521, 0.0, 735.024509773121,
+                 0.0, 463.25045311566834, 719.708087825285,
+                 0.0, 0.0, 1.0]
+use_undistort: true
+distortion_model: "fisheye"
+distortion_coefficients: [0.031511281195814984,
+                          -0.011653488085419278,
+                          -0.0021546766344171507,
+                          0.00021719584539155157]
+
+# The current IMU prediction path projects with a pinhole K back onto the raw
+# image. Keep it disabled until that path uses fisheye forward projection.
+use_imu_flow_prediction: false
+
+clahe_clip_limit: 3.0
+gaussian_kernel_size: 1
+use_ransac: true
+ransac_threshold: 1.0
+ransac_prob: 0.999
+visualize: true
+# Optical Flow 窗口固定宽度，高度按图像宽高比缩放。
+visualize_window_width: 960
+
+# ============================================= IMU =============================================
+gravity: 9.81007
+
+# Noise densities / random walks from kalibr_imu_chain.yaml (sigma, not sigma^2).
+accel_noise_sigma: 0.0005619744336087213
+gyro_noise_sigma: 0.00007495229511447645
+accel_bias_rw_sigma: 0.00013987339606410704
+gyro_bias_rw_sigma: 0.00003438086057268726
+
+# ============================================= Map management =============================================
+max_depth: 60
+min_depth: 0.2
+min_parallax_angle_deg: 0.5
+triangulation_max_reprojection_error: 5.0
+optimization_max_reprojection_error: 30.0
+optimization_max_delete_reprojection_error: 40.0
+
+# ============================================= Backend =============================================
+window_size: 10
+init_window_size: 11
+init_quality_gate: true
+init_min_alignment_attempts: 2
+init_min_span: 0.8
+init_min_excitation: 0.25
+init_max_gravity_error: 1.0
+init_max_condition_number: 1.0e8
+init_max_gyro_bias: 0.5
+init_max_scale_change: 0.20
+
+# Project convention: T_wc = T_wb * T_bc, so T_bc maps camera coordinates to
+# the IMU/body frame. Kalibr provides T_cam_imu; this is inv(T_cam_imu).
+T_bc: [-0.0025095884935861, -0.9999911404677392, -0.0033794898461801, -0.0155562526337425,
+       -0.0079515608875705, -0.0033594385529658,  0.9999627427319766,  0.0241549497167225,
+       -0.9999652367182779,  0.0025363672124558, -0.0079430596321228,  0.0203856532103737,
+        0.0,                 0.0,                 0.0,                 1.0]
+
+visual_noise_sigma: 1.5
+visual_robust_kernel: cauchy
+use_zupt: false
+
+# ============================================= Output =============================================
+use_imu_output: false
+enable_viewer: false
+log_dir: "output/ori/log"
+enable_fps_stats: true
+fps_report_interval: 0
+trajectory_output_path: "output/ori/estimated_trajectory.txt"
