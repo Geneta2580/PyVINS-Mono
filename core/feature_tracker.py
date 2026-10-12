@@ -9,11 +9,13 @@ from utils.debug import Debugger
 from utils.performance_stats import PerformanceStats
 
 class FeatureTracker(threading.Thread):
-    def __init__(self, config, dataloader, imu_processor, output_queue):
+    def __init__(self, config, dataloader, imu_processor, output_queue,
+                 gui_dispatcher=None):
         super().__init__(daemon=True)
         self.config = config
         self.dataloader = dataloader
         self.output_queue = output_queue
+        self.gui_dispatcher = gui_dispatcher
 
         self.imu_processor = imu_processor
         self.use_imu_flow_prediction = self.config.get('use_imu_flow_prediction', True)
@@ -204,6 +206,11 @@ class FeatureTracker(threading.Thread):
                         stats["long_track_ratio"],
                         viz.get("processed_gray"),
                     )
+                    # 发布可视化图像到GUI调度器
+                    if self.gui_dispatcher is not None:
+                        self.gui_dispatcher.publish(
+                            self.visual_processor.visualize_window_name, vis_img
+                        )
 
                 if self.enable_fps_stats:
                     self.fps_stats.tick()

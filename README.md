@@ -45,6 +45,29 @@ This project **strictly requires GTSAM 4.3a0 or GTSAM 4.3a1**.
 ### 2. Environment Setup
 We highly recommend using **Conda** to manage your Python environment and dependencies.
 
+For the optional SALAD loop detector and future LightGlue/VGGT-Omega workers,
+create the shared AI environment and initialize third-party code with:
+
+```bash
+conda env create -f environment-ai.yml
+git submodule update --init --recursive
+```
+
+The AI environment uses Python 3.10, PyTorch 2.6, TorchVision 0.21 and
+NumPy 1.x. This satisfies VGGT-Omega's runtime floor while remaining usable by
+SALAD and LightGlue. Install the CUDA-specific PyTorch wheel appropriate for
+the host driver when needed. GTSAM 4.3a must still be installed separately as
+described below. SALAD and DINOv2 weights are stored under `checkpoints/` and
+the runtime loader never downloads model weights.
+
+For the local GTSAM source/build used by this workspace, install its existing
+Python 3.10 build into `pyvins-ai` with:
+
+```bash
+conda run -n pyvins-ai python -m pip install \
+  /home/geneta/project/gtsam_zhou/gtsam/build/python
+```
+
 **Installing GTSAM 4.3a:**
 You must compile GTSAM 4.3a0 or 4.3a1 from source or install a compatible binary.
 * **Source Compilation Tutorial:** [GTSAM 4.3a](https://github.com/borglab/gtsam)
@@ -144,5 +167,3 @@ We are actively working on improving PyVINS-Mono
 - [ ] Fix IMU gyroscope bias drift
 - [ ] Add ROS interface
 - [x] Add more dataset tests
-
-

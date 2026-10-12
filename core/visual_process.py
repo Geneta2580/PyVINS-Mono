@@ -477,12 +477,10 @@ class VisualProcessor:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             vis_img = np.hstack([vis_img, processed_bgr])
         
-        # 显示图像。窗口按固定宽度缩放，不跟随原图分辨率。
-        self._show_fixed_window(vis_img)
-        
-        return vis_img
+        # 这里只生成显示图像；HighGUI 统一由主线程驱动。
+        return self._make_fixed_window_image(vis_img)
 
-    def _show_fixed_window(self, vis_img):
+    def _make_fixed_window_image(self, vis_img):
         height, width = vis_img.shape[:2]
         display = vis_img
         if width != self.visualize_window_width and width > 0:
@@ -492,8 +490,7 @@ class VisualProcessor:
                 (self.visualize_window_width, display_height),
                 interpolation=cv2.INTER_AREA,
             )
-        cv2.imshow(self.visualize_window_name, display)
-        cv2.waitKey(1)
+        return display
     
     def _predict_optical_flow_with_imu(self, imu_data_for_prediction, imu_processor):
         """

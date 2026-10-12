@@ -1,41 +1,53 @@
-# ORI r01 / cam0 configuration.
-# Calibration source:
-#   /home/geneta/dataset/ORI/kalibr_imucam_chain.yaml
-#   /home/geneta/dataset/ORI/kalibr_imu_chain.yaml
-
-# Exported EuRoC layout: mav0/cam0 and mav0/imu0 under this directory.
+# ----------------------------------------------------------------------------
+# 数据集参数 (Dataset Parameters)
+# ----------------------------------------------------------------------------
+# 数据集根目录。已导出为 EuRoC 布局：mav0/cam0 与 mav0/imu0。
+# 标定来源：kalibr_imucam_chain.yaml、kalibr_imu_chain.yaml
 dataset_path: "/home/geneta/dataset/ORI/r01"
+
+# 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
 
-# Enable Kalibr camera-to-IMU timestamp compensation in UnifiedDataloader.
-# Convention: t_imu = t_cam + timeshift_cam_imu.  Therefore this negative
-# value moves each camera timestamp 4.024710 ms earlier on the IMU clock.
+# Kalibr 约定：t_imu = t_cam + timeshift_cam_imu。
+# 负值把每个相机时间戳在 IMU 时钟上提前 4.024710 ms。
 apply_timeshift_cam_imu: true
 timeshift_cam_imu: -0.004024710194977835
 
-# ============================================= Visual frontend =============================================
+# ============================================= 视觉前端配置参数 =============================================
+# 初始化三角化两帧视差阈值
 initial_parallax: 30
 initial_min_matches: 20
+
+# 初始SFM三角化重投影误差阈值
 initial_sfm_reprojection_threshold: 1.5
+
+# 选择关键帧最小视差，单位像素
 keyframe_parallax: 10
+
+# 关键帧最小跟踪特征点数
 keyframe_min_tracked: 20
+
+# 静止视差
 min_stationary_parallax: 0.5
+
+# 最大特征点数
 max_features_to_detect: 150
+
+# 最小跟踪比例
 min_track_ratio: 0.5
 
-# ORI cam0 is approximately 30 Hz; keep the estimator/keyframe input at 10 Hz.
+# ORI cam0 约 30 Hz，按 10 Hz 向估计器发布。
 estimator_publish_hz: 10
+
+# 特征点间的最小像素距离
 min_dist: 30
 
-image_width: 1472
-image_height: 1440
-
-# Kalibr cam0 pinhole + equidistant calibration. P=K is used by
-# fisheye.undistortPoints, so this K is also the virtual pinhole K used by the
-# existing SfM/backend.
+# 相机内参。fisheye.undistortPoints 使用 P=K，此 K 同时作为后续针孔模型内参。
 cam_intrinsics: [463.9994465216521, 0.0, 735.024509773121,
                  0.0, 463.25045311566834, 719.708087825285,
                  0.0, 0.0, 1.0]
+
+# 相机畸变参数。Kalibr cam0 为 pinhole + equidistant。
 use_undistort: true
 distortion_model: "fisheye"
 distortion_coefficients: [0.031511281195814984,
@@ -43,38 +55,48 @@ distortion_coefficients: [0.031511281195814984,
                           -0.0021546766344171507,
                           0.00021719584539155157]
 
-# The current IMU prediction path projects with a pinhole K back onto the raw
-# image. Keep it disabled until that path uses fisheye forward projection.
-use_imu_flow_prediction: false
+# 是否使用IMU预积分旋转预测光流初值。当前预测仍按针孔投影回原图，先关闭。
+use_imu_flow_prediction: False
 
+# 灰度预处理：CLAHE 对比度限制，高斯核边长（奇数）
 clahe_clip_limit: 3.0
 gaussian_kernel_size: 1
-use_ransac: true
+
+# RANSAC相关参数
+use_ransac: True
 ransac_threshold: 1.0
 ransac_prob: 0.999
-visualize: true
-# Optical Flow 窗口固定宽度，高度按图像宽高比缩放。
+
+# 是否可视化追踪结果。光流窗口宽度固定，高度按图像宽高比缩放。
+visualize: True
 visualize_window_width: 960
 
-# ============================================= IMU =============================================
+# ============================================= IMU配置参数 =============================================
+# 重力模长
 gravity: 9.81007
 
-# Noise densities / random walks from kalibr_imu_chain.yaml (sigma, not sigma^2).
+# 注意这里只是sigma，不是sigma^2。数值来自 kalibr_imu_chain.yaml。
 accel_noise_sigma: 0.0005619744336087213
 gyro_noise_sigma: 0.00007495229511447645
 accel_bias_rw_sigma: 0.00013987339606410704
 gyro_bias_rw_sigma: 0.00003438086057268726
 
-# ============================================= Map management =============================================
-max_depth: 60
+# ============================================= 地图管理参数 =============================================
+# 三角化新地图点条件检查
+max_depth: 60 # 地图点三角化深度检查是否正常
 min_depth: 0.2
-min_parallax_angle_deg: 0.5
-triangulation_max_reprojection_error: 5.0
-optimization_max_reprojection_error: 30.0
-optimization_max_delete_reprojection_error: 40.0
+min_parallax_angle_deg: 0.5 # 三角化新地图点最小视差角度
+triangulation_max_reprojection_error: 5.0 # 三角化新地图点最大重投影误差（每一帧的重投影误差不超过5px）
 
-# ============================================= Backend =============================================
+# 优化新地图点最大重投影误差
+optimization_max_reprojection_error: 30.0 # 地图点进入优化窗口的最大重投影误差
+optimization_max_delete_reprojection_error: 40.0 # 优化新地图点最大删除重投影误差(只有开启优化后抑制不良优化点才有效)
+
+# ============================================= 后端配置参数 =============================================
+# 滑窗大小
 window_size: 10
+
+# 初始化窗口大小
 init_window_size: 11
 init_quality_gate: true
 init_min_alignment_attempts: 2
@@ -85,21 +107,56 @@ init_max_condition_number: 1.0e8
 init_max_gyro_bias: 0.5
 init_max_scale_change: 0.20
 
-# Project convention: T_wc = T_wb * T_bc, so T_bc maps camera coordinates to
-# the IMU/body frame. Kalibr provides T_cam_imu; this is inv(T_cam_imu).
+# 初始化外参。T_wc = T_wb * T_bc，即相机坐标到 IMU/机体坐标。
+# Kalibr 给出 T_cam_imu，这里保存的是它的逆。
 T_bc: [-0.0025095884935861, -0.9999911404677392, -0.0033794898461801, -0.0155562526337425,
        -0.0079515608875705, -0.0033594385529658,  0.9999627427319766,  0.0241549497167225,
        -0.9999652367182779,  0.0025363672124558, -0.0079430596321228,  0.0203856532103737,
         0.0,                 0.0,                 0.0,                 1.0]
 
+# 视觉噪声sigma
 visual_noise_sigma: 1.5
 visual_robust_kernel: cauchy
+
+# 低视差零速先验。关闭后不再加入 σ=0.03 m/s 的速度约束。
 use_zupt: false
 
-# ============================================= Output =============================================
-use_imu_output: false
-enable_viewer: false
+# ============================================= 回环检测 =============================================
+# SALAD 在独立线程中生成全局描述子；队列满时丢弃最旧任务，不阻塞 VIO。
+enable_loop_detection: true
+loop_detector_salad_path: "submodule/salad"
+# DINOv2 代码使用现有本地官方仓库；推理期间不通过 Torch Hub 联网。
+loop_detector_dinov2_path: "/home/geneta/project/dinov2"
+loop_detector_salad_checkpoint: "checkpoints/dino_salad.ckpt"
+loop_detector_dinov2_checkpoint: "checkpoints/dinov2_vitb14_pretrain.pth"
+loop_detector_device: "cuda"
+loop_detector_allow_cpu: false
+loop_detector_image_size: [322, 322]
+loop_detector_use_amp: true
+# 当前关键帧与最佳候选帧并排显示；缩略图压缩后保存在描述子库中。
+loop_detector_visualize: true
+loop_detector_visualization_width: 480
+loop_detector_visualization_jpeg_quality: 80
+loop_detector_queue_size: 2
+loop_detector_result_queue_size: 8
+loop_detector_min_frame_gap: 30
+loop_detector_top_k: 5
+loop_detector_similarity_threshold: 0.85
+
+# ============================================= 输出结果配置 =============================================
+# 是否使用IMU输出
+use_imu_output: False
+
+# 是否可视化
+enable_viewer: False
+
+# 输出日志文件路径
 log_dir: "output/ori/log"
-enable_fps_stats: true
+
+# 帧率统计：每帧记录 instant_fps / avg_fps；结束时打印平均帧率
+enable_fps_stats: True
+# 运行中每隔 N 帧打印一次 FPS（0 表示仅结束时打印）
 fps_report_interval: 0
+
+# 输出轨迹文件路径
 trajectory_output_path: "output/ori/estimated_trajectory.txt"

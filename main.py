@@ -7,14 +7,14 @@ import queue
 import time
 import multiprocessing as mp
 
-import cv2
-
 from utils.dataloader import UnifiedDataloader
 from datatype.global_map import GlobalMap
 from core.imu_process import IMUProcessor
 from core.estimator import Estimator
 from core.feature_tracker import FeatureTracker
-from core.viewer import Viewer3D
+from core.loop_detector import LoopDetector
+from utils.gui_dispatcher import GuiDispatcher
+from utils.viewer import Viewer3D
 
 def main():
     # 1. 配置参数解析
@@ -47,6 +47,10 @@ def main():
     # 前后端队列不限长度。离线 IMU 是 200 Hz，有限队列满了会丢样本。
     feature_tracker_to_estimator_queue = queue.Queue(maxsize=0)
     estimator_to_viewer_queue = queue.Queue(maxsize=20)
+    loop_result_queue = queue.Queue(
+        maxsize=max(1, int(config.get('loop_detector_result_queue_size', 8)))
+    )
+    gui_dispatcher = GuiDispatcher() # 创建GUI调度器
 
     # 初始化数据加载器
     dataloader_config = {
@@ -60,12 +64,28 @@ def main():
     data_loader = UnifiedDataloader(dataloader_config)
 
     # 实例化所有模块
-    feature_tracker = FeatureTracker(config, data_loader, imu_processor, feature_tracker_to_estimator_queue)
-    estimator = Estimator(config, imu_processor, feature_tracker_to_estimator_queue, estimator_to_viewer_queue, global_central_map)
+    # SALAD回环检测器（可选）
+    loop_detector = (
+        LoopDetector(config, loop_result_queue)
+        if config.get('enable_loop_detection', False)
+        else None
+    )
+    feature_tracker = FeatureTracker(
+        config, data_loader, imu_processor, feature_tracker_to_estimator_queue,
+        gui_dispatcher=gui_dispatcher,
+    )
+    estimator = Estimator(
+        config, imu_processor, feature_tracker_to_estimator_queue,
+        estimator_to_viewer_queue, global_central_map,
+        loop_detector=loop_detector, loop_result_queue=loop_result_queue,
+        gui_dispatcher=gui_dispatcher,
+    )
     viewer = Viewer3D(estimator_to_viewer_queue) if config.get('enable_viewer', True) else None
     
     # 3. 启动所有线程
     print("Starting all SLAM threads...")
+    if loop_detector:
+        loop_detector.start()
     feature_tracker.start()
     estimator.start()
 
@@ -74,8 +94,13 @@ def main():
         viewer.start()
 
     try:
-        feature_tracker.join()
-        estimator.join()
+        # OpenCV HighGUI is driven exclusively by the main thread. Timed joins
+        # leave it free to process window events while workers are alive.
+        while feature_tracker.is_alive() or estimator.is_alive():
+            gui_dispatcher.show_pending()
+            feature_tracker.join(timeout=0.005)
+            estimator.join(timeout=0.005)
+        gui_dispatcher.show_pending()
 
     except KeyboardInterrupt:
         print("\n[Main Process] Caught KeyboardInterrupt, initiating shutdown...")
@@ -88,12 +113,18 @@ def main():
         estimator.shutdown()
         if viewer:
             viewer.shutdown()
+        if loop_detector:
+            loop_detector.shutdown()
 
         if feature_tracker.is_alive(): feature_tracker.join()
         if estimator.is_alive(): estimator.join()
         if viewer and viewer.is_alive(): viewer.join()
+        if loop_detector and loop_detector.is_alive():
+            loop_detector.join(timeout=5.0)
+            if loop_detector.is_alive():
+                print("【LoopDetector】: worker is still loading; leaving daemon thread to exit.")
 
-        cv2.destroyAllWindows()
+        gui_dispatcher.close()
         print("[Main Process] SLAM system shut down.")
 
         sent_imu = feature_tracker.sent_imu_count

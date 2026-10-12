@@ -1,8 +1,10 @@
 import gtsam
+import cv2
 import numpy as np
 import threading
 import queue
 import time
+from collections import deque
 
 from gtsam.symbol_shorthand import X, V, B
 
@@ -12,7 +14,6 @@ from datatype.localmap import LocalMap
 from datatype.landmark import Landmark, LandmarkStatus
 from .imu_process import IMUProcessor
 from .sfm_processor import SfMProcessor
-from .viewer import Viewer3D
 from utils.debug import Debugger
 from .vio_initializer import VIOInitializer
 
@@ -24,7 +25,8 @@ class Estimator(threading.Thread):
     # 与 VINS-Mono 一致：关键帧边缘化最老帧，普通帧边缘化次新帧
     MARGIN_OLD = 0
     MARGIN_SECOND_NEW = 1
-    def __init__(self, config, imu_processor, input_queue, viewer_queue, global_central_map):
+    def __init__(self, config, imu_processor, input_queue, viewer_queue, global_central_map,
+                 loop_detector=None, loop_result_queue=None, gui_dispatcher=None):
         super().__init__(daemon=True)
         self.config = config
         self.input_queue = input_queue
@@ -33,7 +35,7 @@ class Estimator(threading.Thread):
 
         # IMU相关
         self.imu_processor = imu_processor
-        self.imu_buffer = []
+        self.imu_buffer = deque()
         self.received_imu_count = 0
         self.cached_imu_edges = {}  # {(id1, id2): {pim, measurements, timestamps, bias_hat}}
         self.scheduled_frames = []  # 等到 IMU 覆盖该帧时间后再进入初始化或跟踪
@@ -67,6 +69,13 @@ class Estimator(threading.Thread):
 
         # 可视化test
         self.viewer_queue = viewer_queue
+        self.loop_detector = loop_detector
+        self.loop_result_queue = loop_result_queue
+        self.gui_dispatcher = gui_dispatcher
+        self.latest_loop_detection = None
+        self.loop_submission_warning_printed = False
+        self.loop_visualize = bool(config.get('loop_detector_visualize', False))
+        self.loop_visualization_window = 'Loop Detection: current | best match'
 
         # 是否使用IMU输出
         self.use_imu_output = self.config.get('use_imu_output', False)
@@ -110,9 +119,12 @@ class Estimator(threading.Thread):
         print("【Estimator】thread started.")
         while self.is_running:
             try:
+                # 消费回环检测结果（若有，非阻塞）
+                self._drain_loop_results()
                 package = self.input_queue.get(timeout=1.0)
 
                 if package is None:
+                    self._drain_loop_results()
                     print("【Estimator】received shutdown signal from frontend.")
                     print(f"【IMU Queue】received {self.received_imu_count}")
                     break
@@ -157,6 +169,81 @@ class Estimator(threading.Thread):
         
         print("【Estimator】thread has finished.")
 
+    def _drain_loop_results(self):
+        """Consume inference output without allowing it to mutate the map yet."""
+        if self.loop_result_queue is None:
+            return
+        while True:
+            try:
+                result = self.loop_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.latest_loop_detection = result
+            candidates = result.get('candidates', [])
+            if candidates:
+                best = candidates[0]
+                print(
+                    f"【LoopDetector】: frame {result['frame_id']} candidate "
+                    f"{best['frame_id']} similarity={best['similarity']:.4f} "
+                    f"inference={result['inference_ms']:.1f} ms"
+                )
+                # 显示最佳回环检测结果，通过GUI调度器发布（避免线程死锁）
+                self._show_best_loop_result(result, best)
+
+    def _show_best_loop_result(self, result, best):
+        """Show current keyframe and its best SALAD candidate side by side."""
+        if not self.loop_visualize or self.gui_dispatcher is None:
+            return
+        current_encoded = result.get('current_image_jpeg')
+        best_encoded = result.get('best_image_jpeg')
+        if current_encoded is None or best_encoded is None:
+            return
+
+        try:
+            current_image = cv2.imdecode(
+                np.frombuffer(current_encoded, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            best_image = cv2.imdecode(
+                np.frombuffer(best_encoded, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if current_image is None or best_image is None:
+                raise ValueError("failed to decode loop visualization image")
+
+            target_height = min(current_image.shape[0], best_image.shape[0])
+            if current_image.shape[0] != target_height:
+                current_image = cv2.resize(
+                    current_image,
+                    (int(round(current_image.shape[1] * target_height /
+                               current_image.shape[0])), target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+            if best_image.shape[0] != target_height:
+                best_image = cv2.resize(
+                    best_image,
+                    (int(round(best_image.shape[1] * target_height /
+                               best_image.shape[0])), target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+            cv2.putText(
+                current_image, f"current: {result['frame_id']}", (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                best_image,
+                f"best: {best['frame_id']}  score: {best['similarity']:.3f}",
+                (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                (0, 255, 255), 2, cv2.LINE_AA,
+            )
+            self.gui_dispatcher.publish(
+                self.loop_visualization_window,
+                np.hstack((current_image, best_image)),
+            )
+        except (cv2.error, ValueError) as exc:
+            # Invalid display data must not terminate estimator.
+            self.loop_visualize = False
+            print(f"【LoopDetector】: visualization disabled: {exc}")
+
     def _ingest_imu_batch(self, imu_batch):
         """图像包里的 IMU 按时间顺序写入。丢样本会在结束时和发送计数对不上。"""
         for timestamp, measurement in imu_batch:
@@ -170,6 +257,26 @@ class Estimator(threading.Thread):
                     self.process_imu_data(timestamp)
                     self.last_processed_imu_timestamp = timestamp
         self._drain_scheduled_frames()
+        self._prune_imu_buffer()
+
+    def _prune_imu_buffer(self):
+        """只保留包住当前 VIO 窗口所需的 IMU 样本。
+
+        已边缘化区间的测量保存在预积分缓存里，早于最早活跃帧或待处理帧的原始样本不再需要。
+        截止时刻上或之前仍留一条，供边界插值。
+        """
+        required_timestamps = [
+            frame.get_timestamp() for frame in self.local_map.get_active_frames()
+        ]
+        required_timestamps.extend(
+            frame.get_timestamp() for frame, _ in self.scheduled_frames
+        )
+        if not required_timestamps:
+            return
+        cutoff = min(required_timestamps)
+        while (len(self.imu_buffer) > 2
+               and self.imu_buffer[1]['timestamp'] <= cutoff + 1e-9):
+            self.imu_buffer.popleft()
 
     def _schedule_frame(self, frame, is_stationary):
         """图像时刻若还没有 IMU，就先挂起。EuRoC 常有一条与图像时间相同的 IMU，它可能排在图像之后。"""
@@ -858,6 +965,16 @@ class Estimator(threading.Thread):
         print(f"【Estimator Timer】: Backend Incremental Optimization took {(end_time - start_time) * 1000:.3f} ms.")
         if not opt_result or not opt_result.get('success'):
             return
+
+        # 回环线程只提交关键帧，put_nowait在回环线程中保证不会阻塞VIO线程。
+        if is_keyframe and self.loop_detector is not None:
+            if not self.loop_detector.submit_keyframe(new_frame):
+                if not self.loop_submission_warning_printed:
+                    print(
+                        f"【LoopDetector】: skipped keyframe {new_frame.get_id()} "
+                        "because the worker is unavailable."
+                    )
+                    self.loop_submission_warning_printed = True
 
         # ---------------------------------------------------------
         # 5. 先同步优化结果，再按帧类型提交边缘化

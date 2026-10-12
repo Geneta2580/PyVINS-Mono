@@ -1,0 +1,34 @@
+name: pyvins-ai
+channels:
+  - conda-forge
+dependencies:
+  # VGGT-Omega requires Python >=3.10 and NumPy <2.
+  - python=3.10
+  - pip
+  - "numpy>=1.24,<2"
+  - pandas
+  - scipy
+  - pyyaml
+  - matplotlib
+  - seaborn
+  - pip:
+      # Torch 2.6 / TorchVision 0.21 satisfy VGGT-Omega and remain compatible
+      # with LightGlue and the SALAD inference code.
+      - "torch>=2.6,<2.7"
+      - "torchvision>=0.21,<0.22"
+      # OpenCV 5 currently pulls NumPy 2.x, while the local GTSAM build and
+      # VGGT-Omega environment are intentionally kept on NumPy 1.x.
+      - "opencv-python>=4.8,<4.12"
+      - "Pillow>=9.0"
+      - "einops>=0.7"
+      - "safetensors>=0.4"
+      - "kornia>=0.6.11"
+      # Existing PyVINS runtime dependency.  GTSAM is intentionally omitted:
+      # this project requires a separately built/installed GTSAM 4.3a wheel.
+      - "open3d>=0.18"
+
+# Install the CUDA-specific PyTorch wheels appropriate for the host driver if
+# the default pip resolver does not select the desired CUDA build. SALAD uses
+# its inference-only local wrapper and does not require Lightning. LightGlue
+# and VGGT-Omega can later be installed editable from their own repositories;
+# they are intentionally not included as submodules yet.

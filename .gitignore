@@ -7,3 +7,7 @@ output/
 hessian.txt
 TEST.txt
 *.log
+
+# Local neural-network weights (documented in checkpoints/README.md).
+checkpoints/*.ckpt
+checkpoints/*.pth
