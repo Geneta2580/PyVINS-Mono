@@ -1,7 +1,8 @@
 """Loop-closure optimization integration point.
 
-SALAD currently produces place-recognition candidates in ``loop_detector``.
-Geometric verification and pose-graph factor insertion intentionally remain
+``loop_detector`` currently produces SALAD candidates and deduplicated
+KLT-BRIEF/FAST-BRIEF correspondences.  Epipolar geometric verification,
+relative-pose estimation, and pose-graph factor insertion intentionally remain
 unimplemented until their measurement and covariance contracts are defined.
 """
 

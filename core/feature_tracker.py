@@ -237,9 +237,24 @@ class FeatureTracker(threading.Thread):
                 })
 
                 # 处理图像信息
+                tracked_raw_features = np.asarray(
+                    viz.get("good_curr", np.empty((0, 2))), dtype=np.float32
+                ).reshape(-1, 2)
+                tracked_feature_ids = np.asarray(
+                    viz.get("good_ids", []), dtype=np.int64
+                ).reshape(-1)
+                if self.visual_processor.use_undistort:
+                    tracked_undistorted_features = (
+                        self.visual_processor.undistort_points(tracked_raw_features)
+                    )
+                else:
+                    tracked_undistorted_features = tracked_raw_features.copy()
                 visual_features = {
                     'visual_features': undistorted_features,
                     'feature_ids': feature_ids,
+                    'tracked_raw_features': tracked_raw_features,
+                    'tracked_undistorted_features': tracked_undistorted_features,
+                    'tracked_feature_ids': tracked_feature_ids,
                     'timestamp': timestamp,
                     'image': image_data,
                     'is_stationary': is_stationary,

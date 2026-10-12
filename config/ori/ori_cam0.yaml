@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------------
 # 数据集根目录。已导出为 EuRoC 布局：mav0/cam0 与 mav0/imu0。
 # 标定来源：kalibr_imucam_chain.yaml、kalibr_imu_chain.yaml
-dataset_path: "/home/geneta/dataset/ORI/r01"
+dataset_path: "/home/geneta/dataset/ORI/r05"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -142,6 +142,12 @@ loop_detector_result_queue_size: 8
 loop_detector_min_frame_gap: 30
 loop_detector_top_k: 5
 loop_detector_similarity_threshold: 0.85
+# 局部回环特征：当前关键帧使用KLT坐标计算BRIEF，历史关键帧使用FAST+BRIEF。
+loop_detector_fast_threshold: 20
+loop_detector_fast_max_keypoints: 500
+loop_detector_brief_bytes: 32
+loop_detector_brief_ratio_threshold: 0.80
+loop_detector_brief_max_distance: 80
 
 # ============================================= 输出结果配置 =============================================
 # 是否使用IMU输出

@@ -18,7 +18,7 @@ dependencies:
       - "torchvision>=0.21,<0.22"
       # OpenCV 5 currently pulls NumPy 2.x, while the local GTSAM build and
       # VGGT-Omega environment are intentionally kept on NumPy 1.x.
-      - "opencv-python>=4.8,<4.12"
+      - "opencv-contrib-python>=4.8,<4.12"
       - "Pillow>=9.0"
       - "einops>=0.7"
       - "safetensors>=0.4"

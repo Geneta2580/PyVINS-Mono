@@ -158,6 +158,28 @@ class Estimator(threading.Thread):
                     new_id = self.next_f_id
                     new_frame = Frame(new_id, timestamp)
                     new_frame.add_visual_features(filtered_features, filtered_ids)
+                    tracked_ids = np.asarray(
+                        package.get('tracked_feature_ids', []), dtype=np.int64
+                    ).reshape(-1)
+                    tracked_raw = np.asarray(
+                        package.get('tracked_raw_features', []), dtype=np.float32
+                    ).reshape(-1, 2)
+                    tracked_undistorted = np.asarray(
+                        package.get('tracked_undistorted_features', []),
+                        dtype=np.float32,
+                    ).reshape(-1, 2)
+                    if not (len(tracked_ids) == len(tracked_raw)
+                            == len(tracked_undistorted)):
+                        raise ValueError("tracked feature arrays are not aligned")
+                    tracked_mask = np.asarray([
+                        feature_id not in self.landmark_denylist
+                        for feature_id in tracked_ids
+                    ], dtype=bool)
+                    new_frame.add_tracked_features(
+                        tracked_raw[tracked_mask],
+                        tracked_undistorted[tracked_mask],
+                        tracked_ids[tracked_mask],
+                    )
                     new_frame.set_image(image)
                     new_frame.set_is_stationary(is_stationary)
 
@@ -185,13 +207,14 @@ class Estimator(threading.Thread):
                 print(
                     f"【LoopDetector】: frame {result['frame_id']} candidate "
                     f"{best['frame_id']} similarity={best['similarity']:.4f} "
+                    f"brief_matches={best.get('brief_match_count', 0)} "
                     f"inference={result['inference_ms']:.1f} ms"
                 )
                 # 显示最佳回环检测结果，通过GUI调度器发布（避免线程死锁）
                 self._show_best_loop_result(result, best)
 
     def _show_best_loop_result(self, result, best):
-        """Show current keyframe and its best SALAD candidate side by side."""
+        """Show the best SALAD candidate and its accepted BRIEF matches."""
         if not self.loop_visualize or self.gui_dispatcher is None:
             return
         current_encoded = result.get('current_image_jpeg')
@@ -225,19 +248,72 @@ class Estimator(threading.Thread):
                     interpolation=cv2.INTER_AREA,
                 )
 
+            canvas = np.hstack((current_image, best_image))
+            matches = best.get('brief_matches', {})
+            current_points = np.asarray(
+                matches.get('current_raw_points', []), dtype=np.float32
+            ).reshape(-1, 2)
+            history_points = np.asarray(
+                matches.get('history_raw_points', []), dtype=np.float32
+            ).reshape(-1, 2)
+            if len(current_points) != len(history_points):
+                raise ValueError("loop match point arrays are not aligned")
+
+            current_source_shape = result.get(
+                'current_image_shape', current_image.shape[:2]
+            )
+            best_source_shape = result.get(
+                'best_image_shape', best_image.shape[:2]
+            )
+            current_source_height, current_source_width = current_source_shape[:2]
+            best_source_height, best_source_width = best_source_shape[:2]
+            if min(current_source_height, current_source_width,
+                   best_source_height, best_source_width) <= 0:
+                raise ValueError("invalid source image size for loop visualization")
+
+            current_scale = np.array([
+                current_image.shape[1] / float(current_source_width),
+                current_image.shape[0] / float(current_source_height),
+            ], dtype=np.float32)
+            best_scale = np.array([
+                best_image.shape[1] / float(best_source_width),
+                best_image.shape[0] / float(best_source_height),
+            ], dtype=np.float32)
+            current_display_points = current_points * current_scale
+            history_display_points = history_points * best_scale
+            history_display_points[:, 0] += current_image.shape[1]
+
+            for index, (current_point, history_point) in enumerate(zip(
+                    current_display_points, history_display_points)):
+                if not (np.all(np.isfinite(current_point))
+                        and np.all(np.isfinite(history_point))):
+                    continue
+                color = (
+                    int(64 + (37 * index) % 192),
+                    int(64 + (73 * index) % 192),
+                    int(64 + (109 * index) % 192),
+                )
+                point_current = tuple(np.rint(current_point).astype(int))
+                point_history = tuple(np.rint(history_point).astype(int))
+                cv2.line(canvas, point_current, point_history, color, 1, cv2.LINE_AA)
+                cv2.circle(canvas, point_current, 3, color, -1, cv2.LINE_AA)
+                cv2.circle(canvas, point_history, 3, color, -1, cv2.LINE_AA)
+
             cv2.putText(
-                current_image, f"current: {result['frame_id']}", (12, 28),
+                canvas, f"current: {result['frame_id']}", (12, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA,
             )
             cv2.putText(
-                best_image,
-                f"best: {best['frame_id']}  score: {best['similarity']:.3f}",
-                (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                canvas,
+                f"best: {best['frame_id']}  score: {best['similarity']:.3f}  "
+                f"brief: {best.get('brief_match_count', 0)}",
+                (current_image.shape[1] + 12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                 (0, 255, 255), 2, cv2.LINE_AA,
             )
             self.gui_dispatcher.publish(
                 self.loop_visualization_window,
-                np.hstack((current_image, best_image)),
+                canvas,
             )
         except (cv2.error, ValueError) as exc:
             # Invalid display data must not terminate estimator.
@@ -427,6 +503,8 @@ class Estimator(threading.Thread):
             self.local_map.landmarks.pop(lm_id, None)
         if frame is not None:
             self.global_map.add_frame(frame_id, frame.get_global_pose())
+            if frame.get_is_keyframe() and self.loop_detector is not None:
+                self.loop_detector.mark_frame_archived(frame_id)
         self.global_map.add_landmarks(archived_landmarks)
         self._assert_window_consistency()
 

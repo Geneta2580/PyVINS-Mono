@@ -12,6 +12,9 @@ class Frame:
 
         self.visual_features = None
         self.visual_feature_ids = None
+        self.tracked_raw_features = None
+        self.tracked_undistorted_features = None
+        self.tracked_feature_ids = None
 
         self.is_stationary = False
         self.is_keyframe = False
@@ -23,6 +26,11 @@ class Frame:
     def add_visual_features(self, visual_features, feature_ids):
         self.visual_features = visual_features
         self.visual_feature_ids = feature_ids
+
+    def add_tracked_features(self, raw_features, undistorted_features, feature_ids):
+        self.tracked_raw_features = raw_features
+        self.tracked_undistorted_features = undistorted_features
+        self.tracked_feature_ids = feature_ids
         
     def set_local_pose(self, local_pose):
         self.local_pose = local_pose
@@ -64,6 +72,15 @@ class Frame:
 
     def get_visual_feature_ids(self):
         return self.visual_feature_ids
+
+    def get_tracked_raw_features(self):
+        return self.tracked_raw_features
+
+    def get_tracked_undistorted_features(self):
+        return self.tracked_undistorted_features
+
+    def get_tracked_feature_ids(self):
+        return self.tracked_feature_ids
     
     def get_is_stationary(self):
         return self.is_stationary
