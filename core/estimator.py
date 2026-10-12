@@ -4,7 +4,9 @@ import numpy as np
 import threading
 import queue
 import time
+from bisect import bisect_right
 from collections import deque
+from pathlib import Path
 
 from gtsam.symbol_shorthand import X, V, B
 
@@ -26,7 +28,8 @@ class Estimator(threading.Thread):
     MARGIN_OLD = 0
     MARGIN_SECOND_NEW = 1
     def __init__(self, config, imu_processor, input_queue, viewer_queue, global_central_map,
-                 loop_detector=None, loop_result_queue=None, gui_dispatcher=None):
+                 loop_detector=None, loop_result_queue=None, gui_dispatcher=None,
+                 loop_optimization=None, loop_optimization_result_queue=None):
         super().__init__(daemon=True)
         self.config = config
         self.input_queue = input_queue
@@ -71,8 +74,19 @@ class Estimator(threading.Thread):
         self.viewer_queue = viewer_queue
         self.loop_detector = loop_detector
         self.loop_result_queue = loop_result_queue
+        self.loop_optimization = loop_optimization
+        self.loop_optimization_result_queue = loop_optimization_result_queue
         self.gui_dispatcher = gui_dispatcher
         self.latest_loop_detection = None
+        self.latest_loop_optimization = None
+        self.loop_optimization_busy = False
+        self.pending_loop_detection = None
+        self.loop_optimization_task_id = 0
+        self.loop_optimization_shutdown_wait = max(
+            0.0, float(config.get('loop_optimization_shutdown_wait_sec', 2.0))
+        )
+        # Estimator内部继续使用连续VIO坐标；该变换只负责VIO到全局PGO坐标的衔接。
+        self.loop_drift = np.eye(4, dtype=np.float64)
         self.loop_submission_warning_printed = False
         self.loop_visualize = bool(config.get('loop_detector_visualize', False))
         self.loop_visualization_window = 'Loop Detection: current | best match'
@@ -85,6 +99,30 @@ class Estimator(threading.Thread):
         trajectory_output_path = self.config.get('trajectory_output_path', None) # self.config.get('trajectory_output_path', None)
         if trajectory_output_path:
             self.trajectory_file = Debugger.initialize_trajectory_file(trajectory_output_path)
+        corrected_path = self.config.get(
+            'loop_corrected_trajectory_output_path', None
+        )
+        if corrected_path is None and trajectory_output_path:
+            online_path = Path(trajectory_output_path)
+            suffix = online_path.suffix or '.txt'
+            corrected_path = online_path.with_name(
+                f"{online_path.stem}_loop_corrected{suffix}"
+            )
+        self.loop_corrected_trajectory_path = (
+            Path(corrected_path) if corrected_path else None
+        )
+        if (self.loop_corrected_trajectory_path is not None
+                and trajectory_output_path is not None
+                and self.loop_corrected_trajectory_path.resolve()
+                == Path(trajectory_output_path).resolve()):
+            raise ValueError(
+                "loop_corrected_trajectory_output_path must differ from "
+                "trajectory_output_path"
+            )
+        # 全部相机帧的最终全局位姿。它独立于LocalMap/GlobalMap生命周期，
+        # 因此被MARGIN_SECOND_NEW丢弃的非关键帧也能出现在最终轨迹中。
+        self.loop_trajectory_records = {}
+        self.loop_trajectory_exported = False
 
         # 劣质点黑名单
         self.landmark_denylist = set()
@@ -120,11 +158,14 @@ class Estimator(threading.Thread):
         while self.is_running:
             try:
                 # 消费回环检测结果（若有，非阻塞）
+                self._drain_loop_optimization_results()
                 self._drain_loop_results()
                 package = self.input_queue.get(timeout=1.0)
 
                 if package is None:
+                    self._drain_loop_optimization_results()
                     self._drain_loop_results()
+                    self._finish_loop_optimization() # 系统结束运行时，等待回环优化结果，超时直接退出
                     print("【Estimator】received shutdown signal from frontend.")
                     print(f"【IMU Queue】received {self.received_imu_count}")
                     break
@@ -187,8 +228,10 @@ class Estimator(threading.Thread):
                     self._schedule_frame(new_frame, is_stationary)
 
             except queue.Empty:
+                self._drain_loop_optimization_results()
                 continue
         
+        self._export_loop_corrected_trajectory()
         print("【Estimator】thread has finished.")
 
     def _drain_loop_results(self):
@@ -208,13 +251,214 @@ class Estimator(threading.Thread):
                     f"【LoopDetector】: frame {result['frame_id']} candidate "
                     f"{best['frame_id']} similarity={best['similarity']:.4f} "
                     f"brief_matches={best.get('brief_match_count', 0)} "
+                    f"epipolar_inliers={best.get('epipolar_inlier_count', 0)} "
+                    f"inlier_ratio={best.get('epipolar_inlier_ratio', 0.0):.2f} "
                     f"inference={result['inference_ms']:.1f} ms"
                 )
                 # 显示最佳回环检测结果，通过GUI调度器发布（避免线程死锁）
+                # result中包含的最优匹配结果：匹配对，当前KF的KLT结果和历史KF的匹配特征点结果
                 self._show_best_loop_result(result, best)
+                if self.loop_optimization is not None:
+                    if self.loop_optimization_busy:
+                        # 地图快照必须在真正提交时获取，因此忙时只保留检测结果。
+                        self.pending_loop_detection = result
+                    else:
+                        self._submit_loop_optimization(result)
+
+    def _pose_in_loop_global(self, pose):
+        return self.loop_drift @ np.asarray(pose, dtype=np.float64).reshape(4, 4)
+
+    def _record_loop_trajectory_frames(self, frames):
+        for frame in frames:
+            pose = frame.get_global_pose()
+            if pose is None:
+                continue
+            self.loop_trajectory_records[int(frame.get_id())] = {
+                'timestamp': float(frame.get_timestamp()),
+                'pose': self._pose_in_loop_global(pose).copy(),
+            }
+
+    def _apply_pose_graph_to_trajectory(self, input_poses, optimized_poses):
+        correction_ids = sorted(set(input_poses) & set(optimized_poses))
+        if not correction_ids:
+            return
+        corrections = {
+            frame_id: (
+                np.asarray(optimized_poses[frame_id], dtype=np.float64).reshape(4, 4)
+                @ np.linalg.inv(np.asarray(
+                    input_poses[frame_id], dtype=np.float64
+                ).reshape(4, 4))
+            )
+            for frame_id in correction_ids
+        }
+        for frame_id, record in self.loop_trajectory_records.items():
+            if frame_id in optimized_poses:
+                record['pose'] = np.asarray(
+                    optimized_poses[frame_id], dtype=np.float64
+                ).reshape(4, 4).copy()
+                continue
+            index = bisect_right(correction_ids, frame_id) - 1
+            correction_id = correction_ids[max(index, 0)]
+            record['pose'] = corrections[correction_id] @ record['pose']
+
+    def _export_loop_corrected_trajectory(self):
+        if (self.loop_trajectory_exported
+                or self.loop_corrected_trajectory_path is None):
+            return
+        output_path = self.loop_corrected_trajectory_path
+        temporary_path = output_path.with_name(output_path.name + '.tmp')
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            records = sorted(
+                self.loop_trajectory_records.values(),
+                key=lambda record: record['timestamp'],
+            )
+            with temporary_path.open('w', encoding='utf-8') as handle:
+                handle.write("# timestamp tx ty tz qx qy qz qw\n")
+                for record in records:
+                    pose = record['pose']
+                    translation = pose[:3, 3]
+                    quaternion = gtsam.Rot3(pose[:3, :3]).toQuaternion()
+                    handle.write(
+                        f"{record['timestamp']} "
+                        f"{translation[0]} {translation[1]} {translation[2]} "
+                        f"{quaternion.x()} {quaternion.y()} {quaternion.z()} "
+                        f"{quaternion.w()}\n"
+                    )
+            temporary_path.replace(output_path)
+            self.loop_trajectory_exported = True
+            print(
+                f"【LoopOptimization】: exported {len(records)} corrected poses "
+                f"to {output_path}"
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"【LoopOptimization】: corrected trajectory export failed: {exc}")
+
+    def _submit_loop_optimization(self, detection):
+        candidates = []
+        for candidate in detection.get('candidates', []):
+            matches = candidate.get('epipolar_matches', {})
+            candidates.append({
+                'frame_id': int(candidate['frame_id']),
+                'similarity': float(candidate['similarity']),
+                'epipolar_matches': {
+                    'current_points_3d_camera': np.asarray(
+                        matches.get('current_points_3d_camera', []),
+                        dtype=np.float64,
+                    ).reshape(-1, 3).copy(), # 当前KF坐标系下的3D点
+                    'history_undistorted_points': np.asarray(
+                        matches.get('history_undistorted_points', []),
+                        dtype=np.float64,
+                    ).reshape(-1, 2).copy(),
+                },
+            })
+        if not candidates:
+            return False
+
+        # 获取全局位姿图
+        frame_poses = self.global_map.pose_graph_snapshot()
+        for frame in self.local_map.get_active_frames():
+            pose = frame.get_global_pose()
+            if frame.get_is_keyframe() and pose is not None:
+                frame_poses[int(frame.get_id())] = self._pose_in_loop_global(pose)
+
+        current_frame_id = int(detection['frame_id'])
+        if current_frame_id not in frame_poses:
+            # detector较慢时关键帧应已进入GlobalMap；不存在说明该结果无法安全定位。
+            print(
+                f"【LoopOptimization】: skip frame {current_frame_id}; "
+                "keyframe pose is no longer available."
+            )
+            return False
+
+        self.loop_optimization_task_id += 1
+        job = {
+            'task_id': self.loop_optimization_task_id,
+            'current_frame_id': current_frame_id,
+            'candidates': candidates,
+            'frame_poses': frame_poses,
+            'drift_at_submission': self.loop_drift.copy(),
+        }
+        if not self.loop_optimization.submit(job):
+            self.pending_loop_detection = detection
+            return False
+        self.loop_optimization_busy = True
+        return True
+
+    def _drain_loop_optimization_results(self, allow_pending=True):
+        if self.loop_optimization_result_queue is None:
+            return
+        while True:
+            try:
+                result = self.loop_optimization_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.loop_optimization_busy = False
+            self.latest_loop_optimization = result
+            if not result.get('success'):
+                print(
+                    f"【LoopOptimization】: frame {result.get('current_frame_id')} "
+                    f"rejected: {result.get('reason', 'unknown error')}"
+                )
+                continue
+
+            input_poses = result['input_poses']
+            optimized_poses = result['optimized_poses']
+            current_frame_id = int(result['current_frame_id'])
+            if (current_frame_id not in input_poses
+                    or current_frame_id not in optimized_poses):
+                print("【LoopOptimization】: invalid PGO result without frontier pose.")
+                continue
+            correction = (
+                optimized_poses[current_frame_id]
+                @ np.linalg.inv(input_poses[current_frame_id])
+            )
+            self.loop_drift = correction @ result['drift_at_submission']
+
+            # 更新全局位姿图
+            self.global_map.apply_pose_graph_update(
+                input_poses, optimized_poses, self.T_bc
+            )
+
+            # 更新回环轨迹记录
+            self._apply_pose_graph_to_trajectory(input_poses, optimized_poses)
+            print(
+                f"【LoopOptimization】: loop {result['history_frame_id']} -> "
+                f"{current_frame_id}, PnP {result['pnp_inlier_count']}/"
+                f"{result['pnp_input_count']} "
+                f"rmse={result['pnp_reprojection_rmse']:.2f}px, "
+                f"GTSAM_PGO={result['elapsed_ms']:.1f}ms "
+                f"iterations={result['optimizer_nfev']} "
+                f"factors={result['optimizer_factor_count']} "
+                f"error={result['optimizer_initial_cost']:.3f}->"
+                f"{result['optimizer_cost']:.3f}"
+            )
+
+        # 如果回环优化任务队列中还有任务，则继续提交
+        if allow_pending and not self.loop_optimization_busy:
+            pending = self.pending_loop_detection
+            self.pending_loop_detection = None
+            if pending is not None:
+                self._submit_loop_optimization(pending)
+
+    def _finish_loop_optimization(self):
+        """At EOF, briefly collect the one in-flight job without risking a hang."""
+        self.pending_loop_detection = None
+        if not self.loop_optimization_busy:
+            return
+        deadline = time.monotonic() + self.loop_optimization_shutdown_wait
+        while self.loop_optimization_busy and time.monotonic() < deadline:
+            self._drain_loop_optimization_results(allow_pending=False)
+            if self.loop_optimization_busy:
+                time.sleep(0.01)
+        if self.loop_optimization_busy:
+            print(
+                "【LoopOptimization】: final job is still running; "
+                "skip waiting to avoid blocking shutdown."
+            )
 
     def _show_best_loop_result(self, result, best):
-        """Show the best SALAD candidate and its accepted BRIEF matches."""
+        """Show the best SALAD candidate and epipolar-RANSAC inliers."""
         if not self.loop_visualize or self.gui_dispatcher is None:
             return
         current_encoded = result.get('current_image_jpeg')
@@ -249,7 +493,7 @@ class Estimator(threading.Thread):
                 )
 
             canvas = np.hstack((current_image, best_image))
-            matches = best.get('brief_matches', {})
+            matches = best.get('epipolar_matches', {})
             current_points = np.asarray(
                 matches.get('current_raw_points', []), dtype=np.float32
             ).reshape(-1, 2)
@@ -306,7 +550,8 @@ class Estimator(threading.Thread):
             cv2.putText(
                 canvas,
                 f"best: {best['frame_id']}  score: {best['similarity']:.3f}  "
-                f"brief: {best.get('brief_match_count', 0)}",
+                f"brief: {best.get('brief_match_count', 0)}  "
+                f"E-inliers: {best.get('epipolar_inlier_count', 0)}",
                 (current_image.shape[1] + 12, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                 (0, 255, 255), 2, cv2.LINE_AA,
@@ -392,6 +637,29 @@ class Estimator(threading.Thread):
             for feature_id, point in zip(
                 frame.get_visual_feature_ids(), frame.get_visual_features())
         }
+
+    def _tracked_points_3d_camera(self, frame):
+        """Copy metric landmarks into this keyframe's camera coordinates for async PnP."""
+        feature_ids = np.asarray(
+            frame.get_tracked_feature_ids(), dtype=np.int64
+        ).reshape(-1)
+        points = np.full((len(feature_ids), 3), np.nan, dtype=np.float64)
+        pose_w_b = frame.get_global_pose()
+        if pose_w_b is None:
+            return points
+        T_wc = np.asarray(pose_w_b, dtype=np.float64).reshape(4, 4) @ self.T_bc
+        R_cw = T_wc[:3, :3].T
+        t_wc = T_wc[:3, 3]
+        for index, feature_id in enumerate(feature_ids):
+            landmark = self.local_map.landmarks.get(int(feature_id))
+            if landmark is None or landmark.position_3d is None:
+                continue
+            position_w = np.asarray(
+                landmark.position_3d, dtype=np.float64
+            ).reshape(3)
+            if np.isfinite(position_w).all():
+                points[index] = R_cw @ (position_w - t_wc)
+        return points
 
     def judge_keyframe(self, active_frames):
         """判断最新帧是否为关键帧。视差用去畸变像素坐标计算。"""
@@ -497,15 +765,37 @@ class Estimator(threading.Thread):
         )
         self._drop_imu_cache_for_frame(frame_id)
         frame = self.local_map.frames.get(frame_id)
+        landmark_reference_frames = {
+            int(lm_id): int(landmark.host_frame_id)
+            for lm_id, landmark in self.local_map.landmarks.items()
+        }
         archived_landmarks = self.local_map.landmark_positions(landmark_ids)
         archived_landmarks.update(self.local_map.remove_frame(frame_id, transfer_host=True))
+        archived_landmarks = {
+            int(lm_id): (
+                self.loop_drift[:3, :3]
+                @ np.asarray(position, dtype=np.float64).reshape(3)
+                + self.loop_drift[:3, 3]
+            )
+            for lm_id, position in archived_landmarks.items()
+        }
         for lm_id in landmark_ids:
             self.local_map.landmarks.pop(lm_id, None)
-        if frame is not None:
-            self.global_map.add_frame(frame_id, frame.get_global_pose())
+        if frame is not None and frame.get_global_pose() is not None:
+            archived_pose = self._pose_in_loop_global(frame.get_global_pose())
+            self.global_map.add_frame(
+                frame_id, archived_pose,
+                is_keyframe=frame.get_is_keyframe(),
+            )
             if frame.get_is_keyframe() and self.loop_detector is not None:
                 self.loop_detector.mark_frame_archived(frame_id)
-        self.global_map.add_landmarks(archived_landmarks)
+        self.global_map.add_landmarks(
+            archived_landmarks,
+            reference_frame_ids={
+                int(lm_id): landmark_reference_frames.get(int(lm_id), frame_id)
+                for lm_id in archived_landmarks
+            },
+        )
         self._assert_window_consistency()
 
     def _commit_margin_second_new(self, frame_a, frame_b, frame_c, edge_ac):
@@ -824,6 +1114,9 @@ class Estimator(threading.Thread):
                 self.local_map.get_active_frames(),
                 self.local_map.landmarks
             )
+            self._record_loop_trajectory_frames(
+                self.local_map.get_active_frames()
+            )
             self._apply_margin_result(margin_result) # 同步边缘化结果到LocalMap
             self._assert_window_consistency()
             self.is_initialized = True
@@ -1044,22 +1337,26 @@ class Estimator(threading.Thread):
         if not opt_result or not opt_result.get('success'):
             return
 
-        # 回环线程只提交关键帧，put_nowait在回环线程中保证不会阻塞VIO线程。
-        if is_keyframe and self.loop_detector is not None:
-            if not self.loop_detector.submit_keyframe(new_frame):
-                if not self.loop_submission_warning_printed:
-                    print(
-                        f"【LoopDetector】: skipped keyframe {new_frame.get_id()} "
-                        "because the worker is unavailable."
-                    )
-                    self.loop_submission_warning_printed = True
-
         # ---------------------------------------------------------
         # 5. 先同步优化结果，再按帧类型提交边缘化
         # ---------------------------------------------------------
 
         # 同步后端优化结果到LocalMap
         self.backend.update_estimator_map(active_frames, self.local_map.landmarks)
+        self._record_loop_trajectory_frames([new_frame])
+
+        # 在后端结果回写后复制PnP所需3D点；异步线程之后不再访问LocalMap。
+        if is_keyframe and self.loop_detector is not None:
+            # 拷贝当前KF追踪的3D点，用于回环PnP计算历史KF的漂移pose
+            points_3d_camera = self._tracked_points_3d_camera(new_frame)
+            if not self.loop_detector.submit_keyframe(
+                    new_frame, points_3d_camera):
+                if not self.loop_submission_warning_printed:
+                    print(
+                        f"【LoopDetector】: skipped keyframe {new_frame.get_id()} "
+                        "because the worker is unavailable."
+                    )
+                    self.loop_submission_warning_printed = True
 
         # 边缘化最老帧
         if margin_flag == self.MARGIN_OLD:
@@ -1138,10 +1435,17 @@ class Estimator(threading.Thread):
             return
         active_frames = self.local_map.get_active_frames()
         poses = {
-            frame.get_id(): frame.get_global_pose()
+            frame.get_id(): self._pose_in_loop_global(frame.get_global_pose())
             for frame in active_frames if frame.get_global_pose() is not None
         }
-        landmarks = self.local_map.get_active_landmarks()
+        landmarks = {
+            landmark_id: (
+                self.loop_drift[:3, :3]
+                @ np.asarray(position, dtype=np.float64).reshape(3)
+                + self.loop_drift[:3, 3]
+            )
+            for landmark_id, position in self.local_map.get_active_landmarks().items()
+        }
         global_poses, global_landmarks = self.global_map.snapshot()
         print(
             f"【Viewer】: {stage} local {len(poses)} poses / {len(landmarks)} landmarks, "

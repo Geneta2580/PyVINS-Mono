@@ -25,6 +25,7 @@ class LoopDetectionTask:
     tracked_raw_points: np.ndarray
     tracked_undistorted_points: np.ndarray
     tracked_feature_ids: np.ndarray
+    tracked_points_3d_camera: np.ndarray
 
 
 @dataclass
@@ -39,6 +40,7 @@ class LoopKeyframeData:
     tracked_raw_points: np.ndarray
     tracked_undistorted_points: np.ndarray
     tracked_feature_ids: np.ndarray
+    tracked_points_3d_camera: np.ndarray
     tracked_brief_descriptors: np.ndarray
     fast_raw_points: np.ndarray
     fast_undistorted_points: np.ndarray
@@ -107,6 +109,22 @@ class LoopDetector(threading.Thread):
         self.brief_max_distance = max(
             0, int(config.get('loop_detector_brief_max_distance', 80))
         )
+        # 回环极线RANSAC阈值，单位为去畸变虚拟针孔图像上的像素。
+        self.epipolar_ransac_threshold = float(
+            config.get('loop_detector_ransac_threshold', 1.0)
+        )
+        if self.epipolar_ransac_threshold <= 0.0:
+            raise ValueError("loop_detector_ransac_threshold must be positive")
+        # RANSAC找到无外点模型的置信度。
+        self.epipolar_ransac_prob = float(
+            config.get('loop_detector_ransac_prob', 0.999)
+        )
+        if not 0.0 < self.epipolar_ransac_prob < 1.0:
+            raise ValueError("loop_detector_ransac_prob must be between 0 and 1")
+        # 少于该数量时不启动本质矩阵几何验证。
+        self.epipolar_ransac_min_matches = max(
+            5, int(config.get('loop_detector_ransac_min_matches', 8))
+        )
         self.fast_detector = cv2.FastFeatureDetector_create(
             threshold=fast_threshold,
             nonmaxSuppression=True,
@@ -136,7 +154,7 @@ class LoopDetector(threading.Thread):
         self.dropped_count = 0
         self.processed_count = 0
 
-    def submit_keyframe(self, frame):
+    def submit_keyframe(self, frame, tracked_points_3d_camera=None):
         """Queue a keyframe without waiting; discard the oldest task if full."""
         if self.stop_event.is_set() or not self.is_alive():
             return False
@@ -151,6 +169,16 @@ class LoopDetector(threading.Thread):
         if (tracked_raw_points is None or tracked_undistorted_points is None
                 or tracked_feature_ids is None):
             return False
+        tracked_count = len(np.asarray(tracked_feature_ids).reshape(-1))
+        if tracked_points_3d_camera is None:
+            tracked_points_3d_camera = np.full(
+                (tracked_count, 3), np.nan, dtype=np.float64
+            )
+        tracked_points_3d_camera = np.asarray(
+            tracked_points_3d_camera, dtype=np.float64
+        ).reshape(-1, 3)
+        if len(tracked_points_3d_camera) != tracked_count:
+            raise ValueError("tracked 3D points and feature IDs are not aligned")
             
         # 创建回环检测任务
         task = LoopDetectionTask(
@@ -166,6 +194,7 @@ class LoopDetector(threading.Thread):
             tracked_feature_ids=np.asarray(
                 tracked_feature_ids, dtype=np.int64
             ).reshape(-1).copy(),
+            tracked_points_3d_camera=tracked_points_3d_camera.copy(),
         )
         try:
             self.task_queue.put_nowait(task)
@@ -424,6 +453,17 @@ class LoopDetector(threading.Thread):
             candidate['brief_match_count'] = int(
                 len(candidate['brief_matches']['distances'])
             )
+            candidate['epipolar_matches'] = self._epipolar_ransac(
+                candidate['brief_matches']
+            )
+            candidate['epipolar_inlier_count'] = int(
+                len(candidate['epipolar_matches']['distances'])
+            )
+            candidate['epipolar_inlier_ratio'] = (
+                candidate['epipolar_inlier_count']
+                / candidate['brief_match_count']
+                if candidate['brief_match_count'] > 0 else 0.0
+            )
         if candidates:
             best_keyframe = self.keyframe_database[candidates[0]['frame_id']]
             best_image_jpeg = best_keyframe.image_jpeg
@@ -485,14 +525,18 @@ class LoopDetector(threading.Thread):
         return corrected.reshape(-1, 2).astype(np.float32)
 
     def _compute_tracked_brief(self, gray, raw_points, undistorted_points,
-                               feature_ids):
+                               feature_ids, points_3d_camera):
         raw_points = np.asarray(raw_points, dtype=np.float32).reshape(-1, 2)
         undistorted_points = np.asarray(
             undistorted_points, dtype=np.float32
         ).reshape(-1, 2)
         feature_ids = np.asarray(feature_ids, dtype=np.int64).reshape(-1)
-        if not (len(raw_points) == len(undistorted_points) == len(feature_ids)):
-            raise ValueError("tracked points and feature IDs are not aligned")
+        points_3d_camera = np.asarray(
+            points_3d_camera, dtype=np.float64
+        ).reshape(-1, 3)
+        if not (len(raw_points) == len(undistorted_points) == len(feature_ids)
+                == len(points_3d_camera)):
+            raise ValueError("tracked 2D/3D points and feature IDs are not aligned")
 
         height, width = gray.shape[:2]
         keypoints = []
@@ -508,6 +552,7 @@ class LoopDetector(threading.Thread):
                 np.empty((0, 2), dtype=np.float32),
                 np.empty((0, 2), dtype=np.float32),
                 np.empty((0,), dtype=np.int64),
+                np.empty((0, 3), dtype=np.float64),
                 np.empty((0, self.brief_extractor.descriptorSize()), dtype=np.uint8),
             )
 
@@ -517,6 +562,7 @@ class LoopDetector(threading.Thread):
                 np.empty((0, 2), dtype=np.float32),
                 np.empty((0, 2), dtype=np.float32),
                 np.empty((0,), dtype=np.int64),
+                np.empty((0, 3), dtype=np.float64),
                 np.empty((0, self.brief_extractor.descriptorSize()), dtype=np.uint8),
             )
         retained_indices = np.asarray(
@@ -528,6 +574,7 @@ class LoopDetector(threading.Thread):
             raw_points[retained_indices],
             undistorted_points[retained_indices],
             feature_ids[retained_indices],
+            points_3d_camera[retained_indices],
             np.asarray(descriptors, dtype=np.uint8),
         )
 
@@ -560,12 +607,13 @@ class LoopDetector(threading.Thread):
 
     def _build_loop_keyframe_data(self, task, descriptor, image_jpeg):
         gray = self._as_gray(task.image)
-        (tracked_raw, tracked_undistorted, tracked_ids,
+        (tracked_raw, tracked_undistorted, tracked_ids, tracked_points_3d,
          tracked_descriptors) = self._compute_tracked_brief(
             gray,
             task.tracked_raw_points,
             task.tracked_undistorted_points,
             task.tracked_feature_ids,
+            task.tracked_points_3d_camera,
         )
         fast_raw, fast_undistorted, fast_descriptors = (
             self._compute_fast_brief(gray)
@@ -579,6 +627,7 @@ class LoopDetector(threading.Thread):
             tracked_raw_points=tracked_raw,
             tracked_undistorted_points=tracked_undistorted,
             tracked_feature_ids=tracked_ids,
+            tracked_points_3d_camera=tracked_points_3d,
             tracked_brief_descriptors=tracked_descriptors,
             fast_raw_points=fast_raw,
             fast_undistorted_points=fast_undistorted,
@@ -593,6 +642,7 @@ class LoopDetector(threading.Thread):
             'current_undistorted_points': np.empty((0, 2), dtype=np.float32),
             'history_undistorted_points': np.empty((0, 2), dtype=np.float32),
             'current_feature_ids': np.empty((0,), dtype=np.int64),
+            'current_points_3d_camera': np.empty((0, 3), dtype=np.float64),
             'distances': np.empty((0,), dtype=np.float32),
         }
 
@@ -643,9 +693,68 @@ class LoopDetector(threading.Thread):
                 history.fast_undistorted_points[history_indices]
             ),
             'current_feature_ids': current.tracked_feature_ids[current_indices],
+            'current_points_3d_camera': (
+                current.tracked_points_3d_camera[current_indices]
+            ),
             'distances': np.asarray(
                 [match.distance for match in accepted], dtype=np.float32
             ),
+        }
+
+    def _epipolar_ransac(self, matches):
+        """Keep correspondences consistent with one calibrated two-view model."""
+        match_count = len(matches['distances'])
+        if match_count < self.epipolar_ransac_min_matches:
+            return self._empty_brief_matches()
+
+        current_points = np.asarray(
+            matches['current_undistorted_points'], dtype=np.float64
+        ).reshape(-1, 2)
+        history_points = np.asarray(
+            matches['history_undistorted_points'], dtype=np.float64
+        ).reshape(-1, 2)
+        if len(current_points) != match_count or len(history_points) != match_count:
+            raise ValueError("BRIEF match arrays are not aligned for epipolar RANSAC")
+
+        finite_mask = np.isfinite(current_points).all(axis=1)
+        finite_mask &= np.isfinite(history_points).all(axis=1)
+        finite_indices = np.flatnonzero(finite_mask)
+        if len(finite_indices) < self.epipolar_ransac_min_matches:
+            return self._empty_brief_matches()
+
+        try:
+            essential_matrix, ransac_mask = cv2.findEssentialMat(
+                current_points[finite_indices],
+                history_points[finite_indices],
+                cameraMatrix=self.cam_intrinsics,
+                method=cv2.RANSAC,
+                prob=self.epipolar_ransac_prob,
+                threshold=self.epipolar_ransac_threshold,
+            )
+        except cv2.error as exc:
+            print(f"【LoopDetector】: epipolar RANSAC failed: {exc}")
+            return self._empty_brief_matches()
+        if essential_matrix is None or ransac_mask is None:
+            return self._empty_brief_matches()
+
+        local_inlier_mask = ransac_mask.reshape(-1).astype(bool)
+        if len(local_inlier_mask) != len(finite_indices):
+            return self._empty_brief_matches()
+        inlier_indices = finite_indices[local_inlier_mask]
+        return {
+            'current_raw_points': matches['current_raw_points'][inlier_indices],
+            'history_raw_points': matches['history_raw_points'][inlier_indices],
+            'current_undistorted_points': (
+                matches['current_undistorted_points'][inlier_indices]
+            ),
+            'history_undistorted_points': (
+                matches['history_undistorted_points'][inlier_indices]
+            ),
+            'current_feature_ids': matches['current_feature_ids'][inlier_indices],
+            'current_points_3d_camera': (
+                matches['current_points_3d_camera'][inlier_indices]
+            ),
+            'distances': matches['distances'][inlier_indices],
         }
 
     def _encode_display_image(self, image):
@@ -730,8 +839,8 @@ class LoopDetector(threading.Thread):
         try:
             self.result_queue.put_nowait(result)
         except queue.Full:
-            # Results are advisory until loop optimization is implemented.
-            # Prefer the newest result and never back-pressure the GPU worker.
+            # Prefer the newest result and never back-pressure the GPU worker;
+            # Estimator snapshots the map only when it can submit optimization.
             try:
                 self.result_queue.get_nowait()
             except queue.Empty:

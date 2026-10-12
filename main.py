@@ -13,6 +13,7 @@ from core.imu_process import IMUProcessor
 from core.estimator import Estimator
 from core.feature_tracker import FeatureTracker
 from core.loop_detector import LoopDetector
+from core.loop_optimization import LoopOptimization
 from utils.gui_dispatcher import GuiDispatcher
 from utils.viewer import Viewer3D
 
@@ -50,6 +51,12 @@ def main():
     loop_result_queue = queue.Queue(
         maxsize=max(1, int(config.get('loop_detector_result_queue_size', 8)))
     )
+    loop_optimization_task_queue = mp.Queue(
+        maxsize=max(1, int(config.get('loop_optimization_queue_size', 1)))
+    )
+    loop_optimization_result_queue = mp.Queue(
+        maxsize=max(1, int(config.get('loop_optimization_result_queue_size', 2)))
+    )
     gui_dispatcher = GuiDispatcher() # 创建GUI调度器
 
     # 初始化数据加载器
@@ -70,6 +77,16 @@ def main():
         if config.get('enable_loop_detection', False)
         else None
     )
+    loop_optimization = (
+        LoopOptimization(
+            config,
+            loop_optimization_task_queue,
+            loop_optimization_result_queue,
+        )
+        if loop_detector is not None
+        and config.get('enable_loop_optimization', True)
+        else None
+    )
     feature_tracker = FeatureTracker(
         config, data_loader, imu_processor, feature_tracker_to_estimator_queue,
         gui_dispatcher=gui_dispatcher,
@@ -79,11 +96,15 @@ def main():
         estimator_to_viewer_queue, global_central_map,
         loop_detector=loop_detector, loop_result_queue=loop_result_queue,
         gui_dispatcher=gui_dispatcher,
+        loop_optimization=loop_optimization,
+        loop_optimization_result_queue=loop_optimization_result_queue,
     )
     viewer = Viewer3D(estimator_to_viewer_queue) if config.get('enable_viewer', True) else None
     
     # 3. 启动所有线程
     print("Starting all SLAM threads...")
+    if loop_optimization:
+        loop_optimization.start()
     if loop_detector:
         loop_detector.start()
     feature_tracker.start()
@@ -115,6 +136,8 @@ def main():
             viewer.shutdown()
         if loop_detector:
             loop_detector.shutdown()
+        if loop_optimization:
+            loop_optimization.shutdown()
 
         if feature_tracker.is_alive(): feature_tracker.join()
         if estimator.is_alive(): estimator.join()
@@ -123,6 +146,10 @@ def main():
             loop_detector.join(timeout=5.0)
             if loop_detector.is_alive():
                 print("【LoopDetector】: worker is still loading; leaving daemon thread to exit.")
+        if loop_optimization and loop_optimization.is_alive():
+            loop_optimization.join(timeout=5.0)
+            if loop_optimization.is_alive():
+                print("【LoopOptimization】: process is still finishing; daemon exit will stop it.")
 
         gui_dispatcher.close()
         print("[Main Process] SLAM system shut down.")

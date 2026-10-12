@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------------
 # 数据集根目录。已导出为 EuRoC 布局：mav0/cam0 与 mav0/imu0。
 # 标定来源：kalibr_imucam_chain.yaml、kalibr_imu_chain.yaml
-dataset_path: "/home/geneta/dataset/ORI/r05"
+dataset_path: "/home/geneta/dataset/ORI/r02"
 
 # 支持euroc\tum\kitti数据集
 dataset_type: "euroc"
@@ -148,6 +148,36 @@ loop_detector_fast_max_keypoints: 500
 loop_detector_brief_bytes: 32
 loop_detector_brief_ratio_threshold: 0.80
 loop_detector_brief_max_distance: 80
+# BRIEF匹配后的本质矩阵RANSAC：像素阈值、置信度和启动估计所需的最少匹配数。
+loop_detector_ransac_threshold: 1.0
+loop_detector_ransac_prob: 0.999
+loop_detector_ransac_min_matches: 8
+
+# PnP和4DoF全局位姿图在独立进程中运行，Estimator只提交快照和应用结果。
+enable_loop_optimization: true
+loop_optimization_queue_size: 1
+loop_optimization_result_queue_size: 2
+# 数据结束时最多等待一个在途PGO结果的秒数，防止退出阶段无限卡住。
+loop_optimization_shutdown_wait_sec: 2.0
+loop_pnp_min_points: 12
+loop_pnp_min_inliers: 10
+loop_pnp_min_inlier_ratio: 0.45
+loop_pnp_reprojection_error: 3.0
+loop_pnp_confidence: 0.999
+loop_pnp_iterations: 200
+loop_pnp_max_translation: 100.0
+# 顺序边和回环边的平移sigma（米）与yaw sigma（度）。
+loop_pgo_odometry_translation_sigma: 0.10
+loop_pgo_odometry_yaw_sigma_deg: 3.0
+loop_pgo_loop_translation_sigma: 0.05
+loop_pgo_loop_yaw_sigma_deg: 2.0
+# 每帧重力方向约束，锁定roll/pitch但保留全局yaw自由度。
+loop_pgo_attitude_sigma_deg: 0.1
+loop_pgo_anchor_sigma: 1.0e-6
+loop_pgo_huber_k: 1.345
+loop_pgo_relative_error_tol: 1.0e-5
+loop_pgo_absolute_error_tol: 1.0e-5
+loop_pgo_max_iterations: 50
 
 # ============================================= 输出结果配置 =============================================
 # 是否使用IMU输出
@@ -166,3 +196,5 @@ fps_report_interval: 0
 
 # 输出轨迹文件路径
 trajectory_output_path: "output/ori/estimated_trajectory.txt"
+# 数据结束时一次性写出的PGO全局修正轨迹（TUM格式，相机帧频率）。
+loop_corrected_trajectory_output_path: "output/ori/estimated_trajectory_loop_corrected.txt"
