@@ -280,31 +280,28 @@ class VisualProcessor:
                 good_prev_undist = good_prev.reshape(-1, 2) # (N, 2)
                 good_curr_undist = good_curr.reshape(-1, 2) # (N, 2)
             
-            # 归一化坐标（Essential Matrix需要）
-            fx = self.cam_matrix[0, 0]
-            fy = self.cam_matrix[1, 1]
-            cx = self.cam_matrix[0, 2]
-            cy = self.cam_matrix[1, 2]
-            
-            good_prev_norm = np.column_stack([
-                (good_prev_undist[:, 0] - cx) / fx,
-                (good_prev_undist[:, 1] - cy) / fy
-            ])
-            good_curr_norm = np.column_stack([
-                (good_curr_undist[:, 0] - cx) / fx,
-                (good_curr_undist[:, 1] - cy) / fy
-            ])
-            
             try:
-                # 使用RANSAC估计本质矩阵
-                E, ransac_mask = cv2.findEssentialMat(
+                # 归一化坐标（Essential Matrix需要）
+                fx = self.cam_matrix[0, 0]
+                fy = self.cam_matrix[1, 1]
+                cx = self.cam_matrix[0, 2]
+                cy = self.cam_matrix[1, 2]
+                good_prev_norm = np.column_stack([
+                    (good_prev_undist[:, 0] - cx) / fx,
+                    (good_prev_undist[:, 1] - cy) / fy
+                ])
+                good_curr_norm = np.column_stack([
+                    (good_curr_undist[:, 0] - cx) / fx,
+                    (good_curr_undist[:, 1] - cy) / fy
+                ])
+                _, ransac_mask = cv2.findEssentialMat(
                     good_prev_norm,
                     good_curr_norm,
-                    focal=1.0,  # 已归一化，使用单位焦距
-                    pp=(0, 0),  # 已归一化，主点为原点
+                    focal=1.0,
+                    pp=(0, 0),
                     method=cv2.RANSAC,
                     prob=self.ransac_prob,
-                    threshold=self.ransac_threshold / fx  # 归一化平面的阈值
+                    threshold=self.ransac_threshold / fx
                 )
                 
                 if ransac_mask is not None:
@@ -395,15 +392,16 @@ class VisualProcessor:
                 final_pts = np.vstack([good_curr, new_pts])
                 final_ids = np.hstack([good_ids, new_ids])
         
-        self.prev_gray = curr_gray
-        self.prev_pts = final_pts
-        self.prev_pt_ids = final_ids
-
-        # 特征点去畸变
+        # 所有模块统一存储虚拟针孔坐标；后端在因子边界转换为 bearing。
         if self.use_undistort:
             undistorted_final_pts = self.undistort_points(final_pts)
+            undistorted_features = undistorted_final_pts
         else:
-            undistorted_final_pts = final_pts.reshape(-1, 2) # (N, 2)
+            undistorted_features = final_pts.reshape(-1, 2)
+
+        self.prev_gray = curr_gray
+        self.prev_pts = np.asarray(final_pts, dtype=np.float32).reshape(-1, 1, 2)
+        self.prev_pt_ids = np.asarray(final_ids)
 
         # 准备返回的统计信息和可视化数据
         stats = {
@@ -421,7 +419,7 @@ class VisualProcessor:
             "processed_gray": curr_gray,
         }
 
-        return undistorted_final_pts, final_ids, stats, viz_payload
+        return undistorted_features, final_ids, stats, viz_payload
 
     def get_age_color(self, age):
         """直接RGB插值"""

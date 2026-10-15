@@ -20,7 +20,11 @@ class Backend:
         self.init_priors = gtsam.NonlinearFactorGraph()
 
         # 鲁棒因子
-        self.visual_noise_sigma = config.get('visual_noise_sigma', 1.5)
+        cam_intrinsics = np.asarray(self.config.get('cam_intrinsics')).reshape(3, 3)
+        focal_scale = 0.5 * (cam_intrinsics[0, 0] + cam_intrinsics[1, 1])
+        # 等效变换：像素噪声除以平均焦距，得到 bearing 切平面上的弧度噪声。
+        self.visual_noise_sigma = float(
+            config.get('visual_noise_sigma', 1.5)) / focal_scale
         self.visual_noise = gtsam.noiseModel.Isotropic.Sigma(2, self.visual_noise_sigma)
         robust_kernel = str(config.get('visual_robust_kernel', 'cauchy')).lower()
         if robust_kernel == 'huber':
@@ -31,6 +35,8 @@ class Backend:
             raise ValueError(f"Unsupported visual_robust_kernel: {robust_kernel}")
         self.visual_robust_noise = gtsam.noiseModel.Robust.Create(estimator, self.visual_noise)
         self.max_reprojection_error = config.get('optimization_max_reprojection_error', 60.0)
+        # 等效变换：像素筛选阈值除以平均焦距，得到 bearing 角度阈值。
+        self.max_bearing_error = float(self.max_reprojection_error) / focal_scale
 
         # 状态与id管理
         self.frame_id_to_gtsam_id = {}
@@ -39,9 +45,6 @@ class Backend:
         self.next_gtsam_frame_id = 0
 
         # 获取相机内、外参
-        cam_intrinsics = np.asarray(self.config.get('cam_intrinsics')).reshape(3, 3)
-        self.K = gtsam.Cal3_S2(cam_intrinsics[0, 0], cam_intrinsics[1, 1], 0, 
-                               cam_intrinsics[0, 2], cam_intrinsics[1, 2])
         self.fx = float(cam_intrinsics[0, 0])
         self.fy = float(cam_intrinsics[1, 1])
         self.cx = float(cam_intrinsics[0, 2])
@@ -71,6 +74,10 @@ class Backend:
         # explicitly enabled extension for non-VINS experiments.
         self.use_zupt = bool(self.config.get('use_zupt', False))
         self.stationary_frame_gtsam_ids = set()
+        if not hasattr(gtsam, 'BearingInverseRangeFactor'):
+            raise RuntimeError(
+                "the PPB backend requires the source-built GTSAM "
+                "BearingInverseRangeFactor; rebuild/install the bundled GTSAM first")
 
     # 帧 id 映射到图的 id
     def _get_frame_gtsam_id(self, frame_id):
@@ -162,9 +169,19 @@ class Backend:
                 self.optimized_landmark_positions.pop(lm_id, None)
                 print(f"【Backend】: 已移除 landmark {lm_id} 的ID映射")
 
-    def _point2(self, pt):
-        arr = np.asarray(pt, dtype=float).reshape(-1)
-        return gtsam.Point2(float(arr[0]), float(arr[1]))
+    def _unit3(self, bearing):
+        return gtsam.Unit3(np.asarray(bearing, dtype=float).reshape(3))
+
+    def _convert_observation(self, observation):
+        """Convert a stored virtual-pinhole observation to a unit bearing."""
+        value = np.asarray(observation, dtype=float).reshape(2)
+        ray = np.array([
+            (value[0] - self.cx) / self.fx,
+            (value[1] - self.cy) / self.fy,
+            1.0,
+        ], dtype=float)
+        norm = np.linalg.norm(ray)
+        return None if norm <= 1e-12 else ray / norm
 
     def _inverse_depth_key(self, landmark_gtsam_id):
         return gtsam.symbol('d', int(landmark_gtsam_id))
@@ -178,7 +195,7 @@ class Backend:
         host_frame_id = group.get('host')
         for frame_id, pixel in group.get('observations', []):
             if int(frame_id) == int(host_frame_id):
-                return np.asarray(pixel, dtype=float).reshape(2)
+                return np.asarray(pixel, dtype=float).reshape(3)
         return None
 
     def _inverse_depth_from_group(self, group):
@@ -188,9 +205,8 @@ class Backend:
         T_wc = self.active_values.atPose3(X(host_id)).matrix() @ self.T_bc
         position = np.asarray(group['position'], dtype=float).reshape(3)
         point_camera = T_wc[:3, :3].T @ (position - T_wc[:3, 3])
-        if point_camera[2] <= 1e-8:
-            return None
-        return 1.0 / float(point_camera[2])
+        distance = float(np.linalg.norm(point_camera))
+        return None if distance <= 1e-8 else 1.0 / distance
 
     def _inverse_depth_world_position(self, lm_id, landmark_obj):
         lm_gtsam_id = self.landmark_id_to_gtsam_id.get(lm_id)
@@ -205,12 +221,11 @@ class Backend:
         rho = float(self.active_values.atDouble(depth_key))
         if rho <= 1e-9 or host_frame_id not in landmark_obj.observations:
             return None
-        pixel = np.asarray(landmark_obj.observations[host_frame_id], dtype=float).reshape(-1)
-        ray = np.array([
-            (pixel[0] - self.cx) / self.fx,
-            (pixel[1] - self.cy) / self.fy,
-            1.0,
-        ])
+        pixel = self._convert_observation(
+            landmark_obj.observations[host_frame_id])
+        if pixel is None:
+            return None
+        ray = pixel / np.linalg.norm(pixel)
         point_camera = ray / rho
         T_wc = self.active_values.atPose3(X(host_id)).matrix() @ self.T_bc
         return T_wc[:3, :3] @ point_camera + T_wc[:3, 3]
@@ -230,11 +245,7 @@ class Backend:
             host_pixel = self._host_observation(group)
             if rho <= 1e-9 or host_pixel is None:
                 continue
-            ray = np.array([
-                (host_pixel[0] - self.cx) / self.fx,
-                (host_pixel[1] - self.cy) / self.fy,
-                1.0,
-            ])
+            ray = host_pixel / np.linalg.norm(host_pixel)
             T_wc = self.active_values.atPose3(X(host_id)).matrix() @ self.T_bc
             point_camera = ray / rho
             self.optimized_landmark_positions[lm_id] = (
@@ -246,19 +257,19 @@ class Backend:
             return None
         T_wc = self.active_values.atPose3(X(gtsam_id)).matrix() @ self.T_bc
         p_c = T_wc[:3, :3].T @ (np.asarray(position, dtype=float).reshape(3) - T_wc[:3, 3])
-        return float(p_c[2])
+        return float(np.linalg.norm(p_c))
 
-    def _reprojection_error_px(self, position, gtsam_id, pt):
+    def _bearing_error(self, position, gtsam_id, pt):
         if not self.active_values.exists(X(gtsam_id)):
             return None
         T_wc = self.active_values.atPose3(X(gtsam_id)).matrix() @ self.T_bc
         p_c = T_wc[:3, :3].T @ (np.asarray(position, dtype=float).reshape(3) - T_wc[:3, 3])
-        if p_c[2] <= 1e-8:
+        norm = np.linalg.norm(p_c)
+        measured = np.asarray(pt, dtype=float).reshape(3)
+        if norm <= 1e-8 or np.linalg.norm(measured) <= 1e-8:
             return None
-        u = self.fx * p_c[0] / p_c[2] + self.cx
-        v = self.fy * p_c[1] / p_c[2] + self.cy
-        measured = np.asarray(pt, dtype=float).reshape(-1)
-        return float(np.hypot(u - measured[0], v - measured[1]))
+        return float(np.arccos(np.clip(
+            np.dot(p_c / norm, measured / np.linalg.norm(measured)), -1.0, 1.0)))
 
     def _select_visual_groups(self, landmark_positions, visual_factors, landmark_hosts=None):
         """保留至少两个正深度、重投影未超阈值的观测。"""
@@ -268,15 +279,19 @@ class Backend:
         for frame_id, lm_id, pt in visual_factors:
             if lm_id not in landmark_positions or landmark_positions[lm_id] is None:
                 continue
-            arr = np.asarray(pt, dtype=float).reshape(-1)
-            if arr.size < 2:
+            # 将像素坐标转换为bearing
+            converted = self._convert_observation(pt)
+            if converted is None:
+                continue
+            arr = np.asarray(converted, dtype=float).reshape(-1)
+            if arr.size < 3:
                 continue
             group = grouped.setdefault(lm_id, {
                 'position': np.asarray(landmark_positions[lm_id], dtype=float).reshape(3),
                 'host': hosts.get(lm_id),
                 'observations': []
             })
-            group['observations'].append((frame_id, arr[:2].copy()))
+            group['observations'].append((frame_id, arr[:3].copy()))
 
         selected = {}
         for lm_id, group in grouped.items():
@@ -291,8 +306,8 @@ class Backend:
                 depth = self._camera_depth(position, gtsam_id)
                 if depth is None or depth <= 0.0:
                     continue
-                error = self._reprojection_error_px(position, gtsam_id, pt)
-                if error is None or error > self.max_reprojection_error:
+                error = self._bearing_error(position, gtsam_id, pt)
+                if error is None or error > self.max_bearing_error:
                     continue
                 valid_obs.append((frame_id, pt))
             if len(valid_obs) < 2:
@@ -367,11 +382,11 @@ class Backend:
                 target_pose_id = self.frame_id_to_gtsam_id.get(frame_id)
                 if target_pose_id is None or not self.active_values.exists(X(target_pose_id)):
                     continue
-                graph.add(gtsam.InverseDepthFactor(
-                    self._point2(pixel), self._point2(host_pixel),
+                graph.add(gtsam.BearingInverseRangeFactor(
+                    self._unit3(pixel), self._unit3(host_pixel),
                     self.visual_robust_noise,
                     X(host_pose_id), X(target_pose_id), depth_key,
-                    self.K, self.body_T_cam))
+                    self.body_T_cam))
                 added += 1
             if added > 0:
                 used.append(lm_id)

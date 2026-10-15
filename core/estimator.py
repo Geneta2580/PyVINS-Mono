@@ -51,6 +51,12 @@ class Estimator(threading.Thread):
 
         self.sfm_processor = SfMProcessor(self.config, self.cam_intrinsics)
 
+        print(
+            "【Visual Geometry】: "
+            "frontend=pinhole initialization=pinhole "
+            "triangulation=pinhole backend=bearing"
+        )
+
         self.next_f_id = 0
 
         # 初始化相关设置
@@ -209,8 +215,7 @@ class Estimator(threading.Thread):
                         package.get('tracked_undistorted_features', []),
                         dtype=np.float32,
                     ).reshape(-1, 2)
-                    if not (len(tracked_ids) == len(tracked_raw)
-                            == len(tracked_undistorted)):
+                    if not (len(tracked_ids) == len(tracked_raw) == len(tracked_undistorted)):
                         raise ValueError("tracked feature arrays are not aligned")
                     tracked_mask = np.asarray([
                         feature_id not in self.landmark_denylist
@@ -682,7 +687,7 @@ class Estimator(threading.Thread):
         if not common_ids:
             return True
 
-        # 这两帧的共视平均视差达到阈值，当前帧是关键帧。
+        # 这两帧的共视平均像素视差达到阈值，当前帧是关键帧。
         parallax = float(np.mean([
             np.linalg.norm(frame_right[feature_id] - frame_left[feature_id])
             for feature_id in common_ids

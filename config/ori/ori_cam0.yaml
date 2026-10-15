@@ -89,7 +89,7 @@ min_parallax_angle_deg: 0.5 # 三角化新地图点最小视差角度
 triangulation_max_reprojection_error: 5.0 # 三角化新地图点最大重投影误差（每一帧的重投影误差不超过5px）
 
 # 优化新地图点最大重投影误差
-optimization_max_reprojection_error: 30.0 # 地图点进入优化窗口的最大重投影误差
+optimization_max_reprojection_error: 30.0 # 等效像素阈值；LocalMap直接使用，bearing后端除以平均焦距换算为弧度
 optimization_max_delete_reprojection_error: 40.0 # 优化新地图点最大删除重投影误差(只有开启优化后抑制不良优化点才有效)
 
 # ============================================= 后端配置参数 =============================================
@@ -114,7 +114,7 @@ T_bc: [-0.0025095884935861, -0.9999911404677392, -0.0033794898461801, -0.0155562
        -0.9999652367182779,  0.0025363672124558, -0.0079430596321228,  0.0203856532103737,
         0.0,                 0.0,                 0.0,                 1.0]
 
-# 视觉噪声sigma
+# 等效像素噪声；固定 bearing 后端用 sigma_px / 平均焦距换算为弧度噪声。
 visual_noise_sigma: 1.5
 visual_robust_kernel: cauchy
 

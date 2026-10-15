@@ -10,10 +10,10 @@ class Frame:
         self.global_pose = None
         self.point_cloud = None
 
-        self.visual_features = None
+        self.visual_features = None # 畸变矫正后的虚拟针孔像素点
         self.visual_feature_ids = None
-        self.tracked_raw_features = None
-        self.tracked_undistorted_features = None
+        self.tracked_raw_features = None # 原始像素点
+        self.tracked_undistorted_features = None # 畸变矫正后的虚拟针孔像素点
         self.tracked_feature_ids = None
 
         self.is_stationary = False
