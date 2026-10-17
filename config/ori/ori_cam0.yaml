@@ -55,6 +55,9 @@ distortion_coefficients: [0.031511281195814984,
                           -0.0021546766344171507,
                           0.00021719584539155157]
 
+# 鱼眼有效区域，相对项目根目录。非零像素允许提点和保留跟踪。
+image_mask: "config/ori/mask_cam0.png"
+
 # 是否使用IMU预积分旋转预测光流初值。当前预测仍按针孔投影回原图，先关闭。
 use_imu_flow_prediction: False
 

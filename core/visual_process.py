@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 import time
@@ -44,8 +46,10 @@ class VisualProcessor:
         self.long_track_age_threshold = self.config.get('long_track_age_threshold', 5)  # 定义"长追踪点"的age阈值
         self.max_age_for_color = self.config.get('max_age_for_color', 10)  # 修复：添加这行
 
-        # 设置mask
-        self.mask = None
+        # 相机有效区域。非零像素允许提点和保留跟踪；未配置时覆盖整幅图像。
+        self.camera_mask = None
+        self._mask_shape_warned = False
+        self._load_camera_mask()
 
         # RANSAC配置
         self.use_ransac = self.config.get('use_ransac', True)
@@ -59,6 +63,61 @@ class VisualProcessor:
         self.clahe_clip_limit = float(self.config.get('clahe_clip_limit', 3.0))
         self.gaussian_kernel_size = int(self.config.get('gaussian_kernel_size', 3))
         self.clahe = cv2.createCLAHE(clipLimit=self.clahe_clip_limit, tileGridSize=(8, 8))
+
+    def _load_camera_mask(self):
+        configured = self.config.get('image_mask') or self.config.get('fisheye_mask')
+        if configured is None or str(configured).strip() == '':
+            return
+        path = Path(str(configured)).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+        if not path.is_file():
+            raise FileNotFoundError(f"Image mask is unavailable: {path}")
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise FileNotFoundError(f"Image mask could not be decoded: {path}")
+        self.camera_mask = np.where(image > 0, np.uint8(255), np.uint8(0))
+        valid_pixels = int(np.count_nonzero(self.camera_mask))
+        print(
+            f"【VisualProcessor】Loaded image mask {path} "
+            f"shape={self.camera_mask.shape} "
+            f"valid={valid_pixels}/{self.camera_mask.size}"
+        )
+
+    def _camera_mask_for(self, image_shape):
+        if self.camera_mask is None:
+            return None
+        if self.camera_mask.shape != tuple(image_shape):
+            if not self._mask_shape_warned:
+                print(
+                    f"【VisualProcessor】Image mask shape {self.camera_mask.shape} "
+                    f"does not match image {tuple(image_shape)}; ignoring mask."
+                )
+                self._mask_shape_warned = True
+            return None
+        return self.camera_mask
+
+    def _base_detection_mask(self, image_shape):
+        camera_mask = self._camera_mask_for(image_shape)
+        if camera_mask is None:
+            return np.ones(image_shape, dtype=np.uint8)
+        return camera_mask.copy()
+
+    def _inside_camera_mask(self, points, image_shape):
+        point_count = len(np.asarray(points).reshape(-1, 2)) if len(points) else 0
+        camera_mask = self._camera_mask_for(image_shape)
+        if camera_mask is None or point_count == 0:
+            return np.ones(point_count, dtype=bool)
+        xy = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        cols = np.rint(xy[:, 0]).astype(np.int32)
+        rows = np.rint(xy[:, 1]).astype(np.int32)
+        inside = (
+            (cols >= 0) & (cols < camera_mask.shape[1])
+            & (rows >= 0) & (rows < camera_mask.shape[0])
+        )
+        valid = np.zeros(point_count, dtype=bool)
+        valid[inside] = camera_mask[rows[inside], cols[inside]] > 0
+        return valid
 
     # 提取特征点
     def detect_features(self, gray_image, max_corners, mask=None):
@@ -106,8 +165,7 @@ class VisualProcessor:
     # 按照特征点追踪时间重排并添加mask
     def filter_features_by_age(self, features, features_ids, image_shape):
         if len(features) == 0:
-            empty_mask = np.ones(image_shape, dtype=np.uint8)
-            return np.empty((0, 1, 2)), np.array([]), empty_mask
+            return np.empty((0, 1, 2)), np.array([]), self._base_detection_mask(image_shape)
 
         features_reshaped = features.reshape(-1, 2)
 
@@ -121,8 +179,8 @@ class VisualProcessor:
         # 按照age降序排序
         pts_with_ages.sort(key=lambda x: x[2], reverse=True)
 
-        # 创建mask
-        age_mask = np.ones(image_shape, dtype=np.uint8)
+        # 从相机有效区域开始，再按最小间距排除已占用像素。
+        age_mask = self._base_detection_mask(image_shape)
         filtered_pts = []
         filtered_ids = []
 
@@ -167,7 +225,11 @@ class VisualProcessor:
         # 第一帧只检测特征，不做关键帧判定
         if self.prev_gray is None or self.prev_pts is None or len(self.prev_pts) == 0:
             self.prev_gray = curr_gray
-            self.prev_pts = self.detect_features(self.prev_gray, self.max_features_to_detect) # (N, 1, 2)
+            self.prev_pts = self.detect_features(
+                self.prev_gray,
+                self.max_features_to_detect,
+                mask=self._base_detection_mask(self.prev_gray.shape),
+            ) # (N, 1, 2)
             if self.prev_pts is None:
                 # 检测失败时返回空结构
                 empty_stats = {
@@ -265,10 +327,14 @@ class VisualProcessor:
         # 最终掩码
         final_mask = (forward_status == 1) & (fb_error < 1.0)
 
-        # 筛选内点
+        # 筛选内点，并丢掉漂出相机有效区域的跟踪点。
         good_prev = self.prev_pts[final_mask]
         good_curr = curr_pts[final_mask]
         good_ids = self.prev_pt_ids[final_mask]
+        region_mask = self._inside_camera_mask(good_curr, curr_gray.shape)
+        good_prev = good_prev[region_mask]
+        good_curr = good_curr[region_mask]
+        good_ids = good_ids[region_mask]
 
         # ============== 添加RANSAC几何验证 ==============
         if self.use_ransac and len(good_curr) >= 8:  # 至少需要8个点
