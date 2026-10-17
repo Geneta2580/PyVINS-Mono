@@ -667,7 +667,7 @@ class Estimator(threading.Thread):
         return points
 
     def judge_keyframe(self, active_frames):
-        """判断最新帧是否为关键帧。视差用去畸变像素坐标计算。"""
+        """判断倒数第二帧是否为关键帧。视差用去畸变像素坐标计算。"""
         if len(active_frames) < 3:
             return True
 
@@ -676,7 +676,7 @@ class Estimator(threading.Thread):
         previous_features = self._feature_map(active_frames[-2])
         tracked_into_newest = newest_features.keys() & previous_features.keys()
 
-        # 最新帧和次新帧的共视太少，保留上一帧，当前帧作为关键帧。
+        # 最新帧和次新帧的共视太少，确认次新帧为关键帧。
         if len(tracked_into_newest) < self.keyframe_min_tracked:
             return True
 
@@ -687,7 +687,7 @@ class Estimator(threading.Thread):
         if not common_ids:
             return True
 
-        # 这两帧的共视平均像素视差达到阈值，当前帧是关键帧。
+        # 这两帧的共视平均像素视差达到阈值，确认次新帧为关键帧。
         parallax = float(np.mean([
             np.linalg.norm(frame_right[feature_id] - frame_left[feature_id])
             for feature_id in common_ids
@@ -1242,16 +1242,18 @@ class Estimator(threading.Thread):
     def process_frame_data(self, new_frame, is_stationary):
         active_frames = self.local_map.get_active_frames()
 
-        # 关键帧判断
+        # 当前帧到达后，判定倒数第二帧是否为关键帧。
+        candidate_frame = active_frames[-2] if len(active_frames) >= 2 else new_frame
         is_keyframe = self.judge_keyframe(active_frames)
-        new_frame.set_is_keyframe(is_keyframe)
+        candidate_frame.set_is_keyframe(is_keyframe)
 
         # 边缘化类型判断
         margin_flag = self.marginalization_flag(is_keyframe)
         margin_name = "MARGIN_OLD" if margin_flag == self.MARGIN_OLD else "MARGIN_SECOND_NEW"
         print(
-            f"【Estimator】: Frame {new_frame.get_id()} "
-            f"is_keyframe={is_keyframe} margin={margin_name}"
+            f"【Estimator】: Candidate frame {candidate_frame.get_id()} "
+            f"is_keyframe={is_keyframe}, triggered_by={new_frame.get_id()} "
+            f"margin={margin_name}"
         )
 
         if len(active_frames) < 2:
@@ -1325,7 +1327,7 @@ class Estimator(threading.Thread):
         }
 
         # ---------------------------------------------------------
-        # 4. 完整窗口优化。边缘化类型由当前帧是否为关键帧决定。
+        # 4. 完整窗口优化。边缘化类型由次新候选帧是否为关键帧决定。
         # ---------------------------------------------------------
         start_time = time.time()
         opt_result = self.backend.optimize_window(
@@ -1350,15 +1352,15 @@ class Estimator(threading.Thread):
         self.backend.update_estimator_map(active_frames, self.local_map.landmarks)
         self._record_loop_trajectory_frames([new_frame])
 
-        # 在后端结果回写后复制PnP所需3D点；异步线程之后不再访问LocalMap。
+        # 在后端结果回写后复制候选KF的PnP所需3D点；异步线程之后不再访问LocalMap。
         if is_keyframe and self.loop_detector is not None:
-            # 拷贝当前KF追踪的3D点，用于回环PnP计算历史KF的漂移pose
-            points_3d_camera = self._tracked_points_3d_camera(new_frame)
+            # 拷贝候选KF追踪的3D点，用于回环PnP计算历史KF的漂移pose
+            points_3d_camera = self._tracked_points_3d_camera(candidate_frame)
             if not self.loop_detector.submit_keyframe(
-                    new_frame, points_3d_camera):
+                    candidate_frame, points_3d_camera):
                 if not self.loop_submission_warning_printed:
                     print(
-                        f"【LoopDetector】: skipped keyframe {new_frame.get_id()} "
+                        f"【LoopDetector】: skipped keyframe {candidate_frame.get_id()} "
                         "because the worker is unavailable."
                     )
                     self.loop_submission_warning_printed = True
